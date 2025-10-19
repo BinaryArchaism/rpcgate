@@ -11,7 +11,7 @@ import (
 
 type Config struct {
 	Logger Logger `yaml:"logger"`
-	Items  []Item `yaml:"items"`
+	RPCs   []RPC  `yaml:"rpcs"`
 }
 
 type Logger struct {
@@ -21,12 +21,15 @@ type Logger struct {
 	NoColor bool          `yaml:"no_color"`
 }
 
-type Item struct {
-	Name string `yaml:"name"`
+type RPC struct {
+	Name    string `yaml:"name"`
+	ChainID int64  `yaml:"chain_id"`
+	Algo    string `yaml:"algo"`
 }
 
-type RPCConn struct {
-	RPCURL string `yaml:"rpc_url"`
+type Provider struct {
+	Name    string `yaml:"name"`
+	ConnURL string `yaml:"conn_url"`
 }
 
 func ParseConfig(path string) (Config, error) {
