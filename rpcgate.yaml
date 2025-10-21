@@ -1,0 +1,15 @@
+# RPCGate example config
+
+no_request_validation: false # default: false
+
+rpcs:
+  - name: mainnet
+    chain_id: 1
+    algo: round-robin
+    providers:
+      - name: publicnode
+        conn_url: https://ethereum-rpc.publicnode.com
+      - name: tenderly
+        conn_url: https://gateway.tenderly.co/public/mainnet
+      - name: drpc
+        conn_url: https://eth.drpc.org

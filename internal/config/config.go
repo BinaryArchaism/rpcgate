@@ -4,14 +4,19 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/goccy/go-yaml"
 	"github.com/rs/zerolog"
 )
 
+const defaultPort = ":8080"
+
 type Config struct {
-	Logger Logger `yaml:"logger"`
-	RPCs   []RPC  `yaml:"rpcs"`
+	NoRequestValidation bool   `yaml:"no_request_validation"`
+	Logger              Logger `yaml:"logger"`
+	RPCs                []RPC  `yaml:"rpcs"`
+	Port                string `yaml:"port"`
 }
 
 type Logger struct {
@@ -22,9 +27,10 @@ type Logger struct {
 }
 
 type RPC struct {
-	Name    string `yaml:"name"`
-	ChainID int64  `yaml:"chain_id"`
-	Algo    string `yaml:"algo"`
+	Name      string     `yaml:"name"`
+	ChainID   int64      `yaml:"chain_id"`
+	Algo      string     `yaml:"algo"`
+	Providers []Provider `yaml:"providers"`
 }
 
 type Provider struct {
@@ -42,6 +48,13 @@ func ParseConfig(path string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("can not unmarshal yaml config file: %w", err)
 	}
+
+	if cfg.Port == "" {
+		cfg.Port = defaultPort
+	} else if !strings.HasPrefix(cfg.Port, ":") {
+		cfg.Port = ":" + cfg.Port
+	}
+
 	err = validateConfig(cfg)
 	if err != nil {
 		return Config{}, fmt.Errorf("can not validate config file: %w", err)
