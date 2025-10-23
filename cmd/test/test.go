@@ -10,9 +10,14 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 )
 
-//nolint:all // no need
 func main() {
-	cli, err := ethclient.Dial("http://localhost:8080")
+	makeRequests("http://localhost:8080/1")
+	makeRequests("http://localhost:8080/8453")
+}
+
+//nolint:all // no need
+func makeRequests(url string) {
+	cli, err := ethclient.Dial(url)
 	if err != nil {
 		panic(err)
 	}
@@ -25,9 +30,9 @@ func main() {
 		},
 	})
 
-	fmt.Println(err)
-	fmt.Println(len(logs))
+	fmt.Println(len(logs), err)
 
+	fmt.Println(cli.BlockNumber(context.Background()))
 	fmt.Println(cli.BlockNumber(context.Background()))
 	fmt.Println(cli.ChainID(context.Background()))
 }

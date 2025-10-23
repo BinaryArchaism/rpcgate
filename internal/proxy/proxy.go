@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"strconv"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	"github.com/valyala/fasthttp"
@@ -16,34 +18,34 @@ type Server struct {
 	srv                 *fasthttp.Server
 	cli                 *fasthttp.Client
 	port                string
-	rr                  *balancer.RoundRobin
+	rr                  map[string]*balancer.RoundRobin
 	noRequestValidation bool
+	rpcs                []config.RPC
 	done                chan struct{}
 }
 
 func New(cfg config.Config) *Server {
 	var srv Server
 
+	var cli fasthttp.Client
+	srv.cli = &cli
+	srv.rpcs = cfg.RPCs
+	srv.port = cfg.Port
+	srv.done = make(chan struct{})
+	srv.rr = make(map[string]*balancer.RoundRobin)
+	srv.noRequestValidation = cfg.NoRequestValidation
+
 	handler := srv.recoverHandler(
 		srv.loggingMiddleware(
 			srv.metricsMiddleware(
-				srv.requestValidationMiddleware(
-					srv.handler))))
+				srv.routerHandler(
+					srv.requestValidationMiddleware(
+						srv.handler)))))
 
 	srv.srv = &fasthttp.Server{ //nolint: exhaustruct // server setup
 		Handler: handler,
 	}
-	var cli fasthttp.Client
-	srv.cli = &cli
 
-	connStrs := make([]string, 0, len(cfg.RPCs[0].Providers))
-	for _, conn := range cfg.RPCs[0].Providers {
-		connStrs = append(connStrs, conn.ConnURL)
-	}
-	srv.rr = balancer.NewRoundRobin(connStrs)
-	srv.port = cfg.Port
-	srv.done = make(chan struct{})
-	srv.noRequestValidation = cfg.NoRequestValidation
 	return &srv
 }
 
@@ -66,7 +68,7 @@ func (srv *Server) Stop() {
 }
 
 func (srv *Server) handler(ctx *fasthttp.RequestCtx) {
-	url := srv.rr.Next()
+	url := srv.rr[string(ctx.RequestURI())].Next()
 	log.Debug().Uint64("id", ctx.ID()).Str("url", url).Msg("request goes to")
 
 	req := fasthttp.AcquireRequest()
@@ -106,12 +108,15 @@ func (srv *Server) recoverHandler(f fasthttp.RequestHandler) fasthttp.RequestHan
 
 func (srv *Server) loggingMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
+		start := time.Now()
+		f(ctx)
 		log.Info().
 			Uint64("id", ctx.ID()).
 			Uint64("conn_id", ctx.ConnID()).
 			Str("remote_ip", ctx.RemoteIP().String()).
-			Msg("request")
-		f(ctx)
+			Int("status", ctx.Response.StatusCode()).
+			Str("latency", time.Since(start).String()).
+			Msg("request complete")
 	}
 }
 
@@ -128,6 +133,33 @@ func (srv *Server) requestValidationMiddleware(f fasthttp.RequestHandler) fastht
 
 func (srv *Server) metricsMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
+		f(ctx)
+	}
+}
+
+func (srv *Server) routerHandler(f fasthttp.RequestHandler) fasthttp.RequestHandler {
+	const base = 10
+	chainToConnUrls := make(map[string][]string)
+	chains := make(map[string]struct{})
+
+	for _, rpc := range srv.rpcs {
+		key := "/" + strconv.FormatInt(rpc.ChainID, base)
+		chains[key] = struct{}{}
+		for _, provider := range rpc.Providers {
+			chainToConnUrls[key] = append(chainToConnUrls[key], provider.ConnURL)
+		}
+	}
+	for chain, urls := range chainToConnUrls {
+		srv.rr[chain] = balancer.NewRoundRobin(urls)
+	}
+
+	return func(ctx *fasthttp.RequestCtx) {
+		_, exist := chains[string(ctx.Request.RequestURI())]
+		if !exist {
+			log.Debug().Msg("unknown path")
+			ctx.Error("not found", fasthttp.StatusNotFound)
+			return
+		}
 		f(ctx)
 	}
 }

@@ -1,11 +1,13 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/goccy/go-yaml"
 	"github.com/rs/zerolog"
 )
@@ -60,6 +62,11 @@ func ParseConfig(path string) (Config, error) {
 		return Config{}, fmt.Errorf("can not validate config file: %w", err)
 	}
 
+	err = validateRPCs(cfg.RPCs)
+	if err != nil {
+		return Config{}, fmt.Errorf("can not validate rpcs: %w", err)
+	}
+
 	return cfg, nil
 }
 
@@ -73,6 +80,28 @@ func validateConfig(cfg Config) error {
 	case "", "stdout", "none":
 	default:
 		return errors.New("Logger.Writer incorrect, should be on of 'stdout', 'none' or empty")
+	}
+
+	return nil
+}
+
+func validateRPCs(rpcs []RPC) error {
+	for _, rpc := range rpcs {
+		for _, provider := range rpc.Providers {
+			cli, err := ethclient.Dial(provider.ConnURL)
+			if err != nil {
+				return fmt.Errorf("can not dial provider '%s' for chain '%d'", provider.Name, rpc.ChainID)
+			}
+			chainID, err := cli.ChainID(context.Background())
+			if err != nil {
+				return fmt.Errorf("can not get chainID for provider '%s' for chain '%d'",
+					provider.Name, rpc.ChainID)
+			}
+			if chainID.Int64() != rpc.ChainID {
+				return fmt.Errorf("chainID mismatched for provider '%s' for chain '%d', got: %d",
+					provider.Name, rpc.ChainID, chainID.Int64())
+			}
+		}
 	}
 
 	return nil
