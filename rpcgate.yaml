@@ -2,6 +2,10 @@
 
 no_request_validation: false # default: false
 
+logger:
+  level: debug
+  format: inline
+
 rpcs:
   - name: mainnet
     chain_id: 1
@@ -13,3 +17,13 @@ rpcs:
         conn_url: https://gateway.tenderly.co/public/mainnet
       - name: drpc
         conn_url: https://eth.drpc.org
+  - name: base
+    chain_id: 8453
+    algo: round-robin
+    providers:
+      - name: publicnode
+        conn_url: https://base-rpc.publicnode.com
+      - name: tenderly
+        conn_url: https://base.gateway.tenderly.co
+      - name: lava
+        conn_url: https://base.lava.build
