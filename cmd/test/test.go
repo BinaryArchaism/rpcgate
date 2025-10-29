@@ -11,8 +11,8 @@ import (
 )
 
 func main() {
-	makeRequests("http://localhost:8080/1")
-	makeRequests("http://localhost:8080/8453")
+	makeRequests("http://admin:test@localhost:8080/1")
+	makeRequests("http://admin:admin@localhost:8080/8453")
 }
 
 //nolint:all // no need

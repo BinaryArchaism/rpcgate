@@ -3,8 +3,11 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"fmt"
 	"io"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -21,6 +24,7 @@ type Server struct {
 	rr                  map[string]*balancer.RoundRobin
 	noRequestValidation bool
 	rpcs                []config.RPC
+	clients             config.Clients
 	done                chan struct{}
 }
 
@@ -34,13 +38,15 @@ func New(cfg config.Config) *Server {
 	srv.done = make(chan struct{})
 	srv.rr = make(map[string]*balancer.RoundRobin)
 	srv.noRequestValidation = cfg.NoRequestValidation
+	srv.clients = cfg.Clients
 
 	handler := srv.recoverHandler(
 		srv.loggingMiddleware(
 			srv.metricsMiddleware(
-				srv.routerHandler(
-					srv.requestValidationMiddleware(
-						srv.handler)))))
+				srv.authMiddleware(
+					srv.routerHandler(
+						srv.requestValidationMiddleware(
+							srv.handler))))))
 
 	srv.srv = &fasthttp.Server{ //nolint: exhaustruct // server setup
 		Handler: handler,
@@ -162,4 +168,59 @@ func (srv *Server) routerHandler(f fasthttp.RequestHandler) fasthttp.RequestHand
 		}
 		f(ctx)
 	}
+}
+
+func (srv *Server) authMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHandler {
+	const authHeaderName = "Authorization"
+	loginToPass := make(map[string]string)
+	for _, c := range srv.clients.Clients {
+		loginToPass[c.Login] = c.Password
+	}
+	return func(ctx *fasthttp.RequestCtx) {
+		header := ctx.Request.Header.Peek(authHeaderName)
+		login, pass, err := GetBasicAuthDecoded(string(header))
+		// TODO: set login to ctx client name for future logs
+
+		if !srv.clients.AuthRequired {
+			f(ctx)
+			return
+		}
+		if err != nil {
+			log.Error().Err(err).Msg("failed to decode basic auth")
+			ctx.Error("", fasthttp.StatusUnauthorized)
+			return
+		}
+		expectedPass, exist := loginToPass[login]
+		if !exist {
+			log.Info().
+				Uint64("id", ctx.ID()).
+				Uint64("conn_id", ctx.ConnID()).
+				Err(err).Msg("invalid login")
+			ctx.Error("", fasthttp.StatusUnauthorized)
+			return
+		}
+		if expectedPass != pass {
+			log.Info().
+				Uint64("id", ctx.ID()).
+				Uint64("conn_id", ctx.ConnID()).
+				Err(err).Msg("invalid pass")
+			ctx.Error("", fasthttp.StatusUnauthorized)
+			return
+		}
+		f(ctx)
+	}
+}
+
+func GetBasicAuthDecoded(header string) (string, string, error) {
+	const (
+		prefix    = "Basic "
+		separator = ":"
+	)
+	removedPrefix := strings.TrimPrefix(header, prefix)
+	decodedLoginPass, err := base64.StdEncoding.DecodeString(removedPrefix)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to decode auth header: %w", err)
+	}
+	log, pass, _ := strings.Cut(string(decodedLoginPass), separator)
+	return log, pass, nil
 }

@@ -15,10 +15,22 @@ import (
 const defaultPort = ":8080"
 
 type Config struct {
-	NoRequestValidation bool   `yaml:"no_request_validation"`
-	Logger              Logger `yaml:"logger"`
-	RPCs                []RPC  `yaml:"rpcs"`
-	Port                string `yaml:"port"`
+	NoRequestValidation bool    `yaml:"no_request_validation"`
+	NoRPCValidation     bool    `yaml:"no_rpc_validation"`
+	Clients             Clients `yaml:"clients"`
+	Logger              Logger  `yaml:"logger"`
+	RPCs                []RPC   `yaml:"rpcs"`
+	Port                string  `yaml:"port"`
+}
+
+type Clients struct {
+	AuthRequired bool     `yaml:"auth_required"`
+	Clients      []Client `yaml:"clients"`
+}
+
+type Client struct {
+	Login    string `yaml:"login"`
+	Password string `yaml:"password"`
 }
 
 type Logger struct {
@@ -62,9 +74,11 @@ func ParseConfig(path string) (Config, error) {
 		return Config{}, fmt.Errorf("can not validate config file: %w", err)
 	}
 
-	err = validateRPCs(cfg.RPCs)
-	if err != nil {
-		return Config{}, fmt.Errorf("can not validate rpcs: %w", err)
+	if !cfg.NoRPCValidation {
+		err = validateRPCs(cfg.RPCs)
+		if err != nil {
+			return Config{}, fmt.Errorf("can not validate rpcs: %w", err)
+		}
 	}
 
 	return cfg, nil
