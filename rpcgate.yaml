@@ -1,10 +1,17 @@
 # RPCGate example config
 
 no_request_validation: false # default: false
+no_rpc_validation: false # default: false
 
 logger:
   level: debug
   format: inline
+
+clients:
+  auth_required: false # default: false
+  clients: 
+    - login: admin
+      password: test
 
 rpcs:
   - name: mainnet
