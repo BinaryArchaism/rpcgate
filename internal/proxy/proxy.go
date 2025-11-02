@@ -25,6 +25,7 @@ type Server struct {
 	noRequestValidation bool
 	rpcs                []config.RPC
 	clients             config.Clients
+	metricsCfg          config.Metrics
 	done                chan struct{}
 }
 
@@ -39,6 +40,7 @@ func New(cfg config.Config) *Server {
 	srv.rr = make(map[string]*balancer.RoundRobin)
 	srv.noRequestValidation = cfg.NoRequestValidation
 	srv.clients = cfg.Clients
+	srv.metricsCfg = cfg.Metrics
 
 	handler := srv.recoverHandler(
 		srv.loggingMiddleware(
@@ -138,7 +140,16 @@ func (srv *Server) requestValidationMiddleware(f fasthttp.RequestHandler) fastht
 }
 
 func (srv *Server) metricsMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHandler {
+	if !srv.metricsCfg.Enabled {
+		return func(ctx *fasthttp.RequestCtx) {
+			f(ctx)
+		}
+	}
 	return func(ctx *fasthttp.RequestCtx) {
+		// latency
+		// method
+		// client
+
 		f(ctx)
 	}
 }
