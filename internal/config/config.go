@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/goccy/go-yaml"
 	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 const defaultPort = ":8080"
@@ -61,11 +63,17 @@ type Provider struct {
 
 func ParseConfig(path string) (Config, error) {
 	var cfg Config
-	yml, err := os.ReadFile(path)
+	ymlBytes, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("can not read yaml config file: %w", err)
 	}
-	err = yaml.Unmarshal(yml, &cfg)
+	yml := string(ymlBytes)
+	placeholderToValue := parseConfigPlaceholders(yml)
+	for placeholder, value := range placeholderToValue {
+		yml = strings.ReplaceAll(yml, placeholder, value)
+	}
+
+	err = yaml.Unmarshal([]byte(yml), &cfg)
 	if err != nil {
 		return Config{}, fmt.Errorf("can not unmarshal yaml config file: %w", err)
 	}
@@ -115,8 +123,8 @@ func validateRPCs(rpcs []RPC) error {
 			}
 			chainID, err := cli.ChainID(context.Background())
 			if err != nil {
-				return fmt.Errorf("can not get chainID for provider '%s' for chain '%d'",
-					provider.Name, rpc.ChainID)
+				return fmt.Errorf("can not get chainID for provider '%s' for chain '%d', err: %w",
+					provider.Name, rpc.ChainID, err)
 			}
 			if chainID.Int64() != rpc.ChainID {
 				return fmt.Errorf("chainID mismatched for provider '%s' for chain '%d', got: %d",
@@ -126,4 +134,20 @@ func validateRPCs(rpcs []RPC) error {
 	}
 
 	return nil
+}
+
+func parseConfigPlaceholders(rawCfg string) map[string]string {
+	re := regexp.MustCompile(`\$\{[^}]+\}`)
+	placeholders := re.FindAllString(rawCfg, -1)
+	result := make(map[string]string)
+	for _, ph := range placeholders {
+		key := strings.TrimSuffix(strings.TrimPrefix(ph, "${"), "}")
+		value, found := os.LookupEnv(key)
+		if !found {
+			log.Panic().Str("key", key).Msg("can not find env by key")
+		}
+		result[ph] = value
+	}
+
+	return result
 }
