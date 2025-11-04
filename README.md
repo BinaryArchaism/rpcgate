@@ -13,8 +13,8 @@ It increases reliability, provides unified access across chains, and exposes met
 ### ✨ Features
 - **Multi-chain configuration** — define gateways for several networks in a single file.  
 - **Multi-provider setup** — balance requests across public RPCs or private nodes for high availability.  
-- **Metrics (WIP)** — observe provider latency, error rates and usage.  
-- **Client tracking (WIP)** — per-application statistics.  
+- **Metrics** — observe provider latency, error rates and usage.  
+- **Client tracking** — per-application statistics.  
 
 
 ### 🚀 Quick start
