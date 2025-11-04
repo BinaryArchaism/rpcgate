@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -46,12 +45,13 @@ func New(cfg config.Config) *Server {
 	srv.metricsCfg = cfg.Metrics
 
 	handler := srv.recoverHandler(
-		srv.loggingMiddleware(
-			srv.metricsMiddleware(
-				srv.authMiddleware(
-					srv.routerHandler(
-						srv.requestValidationMiddleware(
-							srv.handler))))))
+		srv.healtzProbeMidleware(
+			srv.loggingMiddleware(
+				srv.metricsMiddleware(
+					srv.authMiddleware(
+						srv.routerHandler(
+							srv.requestValidationMiddleware(
+								srv.handler)))))))
 
 	srv.srv = &fasthttp.Server{ //nolint: exhaustruct // server setup
 		Handler: handler,
@@ -144,6 +144,7 @@ func (srv *Server) loggingMiddleware(f fasthttp.RequestHandler) fasthttp.Request
 			Str("remote_ip", ctx.RemoteIP().String()).
 			Int("status", ctx.Response.StatusCode()).
 			Str("latency", time.Since(start).String()).
+			Str("path", string(ctx.Request.RequestURI())).
 			Msg("request complete")
 	}
 }
@@ -184,7 +185,7 @@ func (srv *Server) metricsMiddleware(f fasthttp.RequestHandler) fasthttp.Request
 			metrics.ClientRequestError.WithLabelValues(
 				chainID, reqctx.ChainName, reqctx.Provider, reqctx.Request.Method, reqctx.Client).Inc()
 		}
-		if ctx.Response.StatusCode() != http.StatusOK {
+		if ctx.Response.StatusCode() != fasthttp.StatusOK {
 			metrics.RequestError.WithLabelValues(
 				chainID, reqctx.ChainName, reqctx.Provider, reqctx.Request.Method, reqctx.Client).Inc()
 		}
@@ -278,4 +279,18 @@ func GetBasicAuthDecoded(header string) (string, string, error) {
 		log = defaultClient
 	}
 	return log, pass, nil
+}
+
+func (srv *Server) healtzProbeMidleware(f fasthttp.RequestHandler) fasthttp.RequestHandler {
+	const healthzProbePath = "/healthz"
+
+	return func(ctx *fasthttp.RequestCtx) {
+		if string(ctx.Request.RequestURI()) != healthzProbePath {
+			f(ctx)
+			return
+		}
+
+		ctx.Response.SetStatusCode(fasthttp.StatusOK)
+		ctx.Response.SetBodyString("ok")
+	}
 }
