@@ -48,6 +48,13 @@ func Test_Server_getBasicAuthDecoded(t *testing.T) {
 			password: "",
 			needErr:  true,
 		},
+		{
+			name:     "empty",
+			header:   "Basic " + getBase64Encoded(":"),
+			login:    "_unknown_",
+			password: "",
+			needErr:  false,
+		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {

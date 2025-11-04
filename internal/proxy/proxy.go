@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/BinaryArchaism/rpcgate/internal/balancer"
 	"github.com/BinaryArchaism/rpcgate/internal/config"
+	"github.com/BinaryArchaism/rpcgate/internal/metrics"
 )
 
 type Server struct {
@@ -76,24 +79,41 @@ func (srv *Server) Stop() {
 }
 
 func (srv *Server) handler(ctx *fasthttp.RequestCtx) {
-	url := srv.rr[string(ctx.RequestURI())].Next()
-	log.Debug().Uint64("id", ctx.ID()).Str("url", url).Msg("request goes to")
+	provider := srv.rr[string(ctx.RequestURI())].Next()
+
+	log.Debug().Uint64("id", ctx.ID()).Str("name", provider.Name).Msg("request goes to")
+
+	SetProviderToReqCtx(ctx, provider.Name)
 
 	req := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req)
 
-	req.SetRequestURI(url)
+	var request JSONRPCRequest
+	err := json.Unmarshal(ctx.Request.Body(), &request)
+	if err != nil {
+		log.Error().Err(err).Msg("can not parse request")
+	}
+	SetJSONRPCRequestToCtx(ctx, request)
+
+	req.SetRequestURI(provider.ConnURL)
 	req.SetBody(ctx.Request.Body())
 	req.Header.SetMethod(fasthttp.MethodPost)
 
 	resp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseResponse(resp)
 
-	err := srv.cli.Do(req, resp)
+	err = srv.cli.Do(req, resp)
 	if err != nil {
 		log.Error().Err(err).Msg("error while request")
 		return
 	}
+
+	var response JSONRPCResponse
+	err = json.Unmarshal(resp.Body(), &response)
+	if err != nil {
+		log.Error().Err(err).Msg("can not parse response")
+	}
+	SetJSONRPCResponceToCtx(ctx, response)
 
 	_, err = io.Copy(ctx, bytes.NewReader(resp.Body()))
 	if err != nil {
@@ -145,38 +165,57 @@ func (srv *Server) metricsMiddleware(f fasthttp.RequestHandler) fasthttp.Request
 			f(ctx)
 		}
 	}
+
 	return func(ctx *fasthttp.RequestCtx) {
-		// latency
-		// method
-		// client
+		start := time.Now()
 
 		f(ctx)
+
+		reqctx := GetReqCtx(ctx)
+
+		const base = 10
+		chainID := strconv.FormatInt(reqctx.ChainID, base)
+		metrics.RequestLatencySeconds.WithLabelValues(
+			chainID, reqctx.ChainName, reqctx.Provider, reqctx.Request.Method, reqctx.Client).
+			Observe(time.Since(start).Seconds())
+		metrics.RequestTotalCounter.WithLabelValues(
+			chainID, reqctx.ChainName, reqctx.Provider, reqctx.Request.Method, reqctx.Client).Inc()
+		if reqctx.Response.HasError() {
+			metrics.ClientRequestError.WithLabelValues(
+				chainID, reqctx.ChainName, reqctx.Provider, reqctx.Request.Method, reqctx.Client).Inc()
+		}
+		if ctx.Response.StatusCode() != http.StatusOK {
+			metrics.RequestError.WithLabelValues(
+				chainID, reqctx.ChainName, reqctx.Provider, reqctx.Request.Method, reqctx.Client).Inc()
+		}
 	}
 }
 
 func (srv *Server) routerHandler(f fasthttp.RequestHandler) fasthttp.RequestHandler {
 	const base = 10
-	chainToConnUrls := make(map[string][]string)
-	chains := make(map[string]struct{})
+	chainToConnUrls := make(map[string][]config.Provider)
+	chains := make(map[string]int64)
+	chainIDToName := make(map[int64]string)
 
 	for _, rpc := range srv.rpcs {
 		key := "/" + strconv.FormatInt(rpc.ChainID, base)
-		chains[key] = struct{}{}
-		for _, provider := range rpc.Providers {
-			chainToConnUrls[key] = append(chainToConnUrls[key], provider.ConnURL)
-		}
+		chains[key] = rpc.ChainID
+		chainIDToName[rpc.ChainID] = rpc.Name
+		chainToConnUrls[key] = append(chainToConnUrls[key], rpc.Providers...)
 	}
 	for chain, urls := range chainToConnUrls {
 		srv.rr[chain] = balancer.NewRoundRobin(urls)
 	}
 
 	return func(ctx *fasthttp.RequestCtx) {
-		_, exist := chains[string(ctx.Request.RequestURI())]
+		chainID, exist := chains[string(ctx.Request.RequestURI())]
 		if !exist {
 			log.Debug().Msg("unknown path")
 			ctx.Error("not found", fasthttp.StatusNotFound)
 			return
 		}
+		SetChainIDToReqCtx(ctx, chainID)
+		SetChainNameToReqCtx(ctx, chainIDToName[chainID])
 		f(ctx)
 	}
 }
@@ -190,7 +229,8 @@ func (srv *Server) authMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHan
 	return func(ctx *fasthttp.RequestCtx) {
 		header := ctx.Request.Header.Peek(authHeaderName)
 		login, pass, err := GetBasicAuthDecoded(string(header))
-		// TODO: set login to ctx client name for future logs
+
+		SetClientToReqCtx(ctx, login)
 
 		if !srv.clients.AuthRequired {
 			f(ctx)
@@ -224,14 +264,18 @@ func (srv *Server) authMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHan
 
 func GetBasicAuthDecoded(header string) (string, string, error) {
 	const (
-		prefix    = "Basic "
-		separator = ":"
+		prefix        = "Basic "
+		separator     = ":"
+		defaultClient = "_unknown_"
 	)
 	removedPrefix := strings.TrimPrefix(header, prefix)
 	decodedLoginPass, err := base64.StdEncoding.DecodeString(removedPrefix)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to decode auth header: %w", err)
+		return defaultClient, "", fmt.Errorf("failed to decode auth header: %w", err)
 	}
 	log, pass, _ := strings.Cut(string(decodedLoginPass), separator)
+	if log == "" {
+		log = defaultClient
+	}
 	return log, pass, nil
 }

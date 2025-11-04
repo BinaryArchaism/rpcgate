@@ -1,12 +1,16 @@
 package balancer
 
-import "container/ring"
+import (
+	"container/ring"
+
+	"github.com/BinaryArchaism/rpcgate/internal/config"
+)
 
 type RoundRobin struct {
 	r *ring.Ring
 }
 
-func NewRoundRobin(urls []string) *RoundRobin {
+func NewRoundRobin(urls []config.Provider) *RoundRobin {
 	r := ring.New(len(urls))
 	for _, url := range urls {
 		r.Value = url
@@ -17,7 +21,7 @@ func NewRoundRobin(urls []string) *RoundRobin {
 	}
 }
 
-func (rr *RoundRobin) Next() string {
+func (rr *RoundRobin) Next() config.Provider {
 	rr.r = rr.r.Next()
-	return rr.r.Value.(string) //nolint:errcheck // imposible
+	return rr.r.Value.(config.Provider) //nolint:errcheck // imposible
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -13,6 +14,38 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/BinaryArchaism/rpcgate/internal/config"
+)
+
+const (
+	namespace            = "rpcgate"
+	defaultPath          = "/metrics"
+	defaultPort    int64 = 9090
+	defaultTimeout       = 5 * time.Second
+)
+
+//nolint:gochecknoglobals // metrics
+var (
+	RequestLatencySeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: namespace,
+		Name:      "request_latency_seconds",
+		Help:      "Request latency distribution in seconds",
+		Buckets:   []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5},
+	}, []string{"chain_id", "chain_name", "provider", "method", "client"})
+	RequestTotalCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "request_total",
+		Help:      "Request total",
+	}, []string{"chain_id", "chain_name", "provider", "method", "client"})
+	RequestError = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "request_error_total",
+		Help:      "Request error total",
+	}, []string{"chain_id", "chain_name", "provider", "method", "client"})
+	ClientRequestError = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "client_request_error_total",
+		Help:      "Client request error total",
+	}, []string{"chain_id", "chain_name", "provider", "method", "client"})
 )
 
 type Server struct {
@@ -24,11 +57,13 @@ func New(cfg config.Config) *Server {
 	reg.MustRegister(
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+		RequestLatencySeconds,
+		RequestTotalCounter,
+		RequestError,
+		ClientRequestError,
 	)
-
 	m := http.NewServeMux()
-
-	path := "/metrics"
+	path := defaultPath
 	if cfg.Metrics.Path != "" {
 		path = "/" + strings.TrimPrefix(cfg.Metrics.Path, "/")
 	}
@@ -39,16 +74,17 @@ func New(cfg config.Config) *Server {
 			EnableOpenMetrics: true,
 		},
 	))
-
-	var port int64 = 8080
+	port := defaultPort
 	if cfg.Metrics.Port != 0 {
 		port = cfg.Metrics.Port
 	}
-
 	return &Server{
 		srv: &http.Server{
-			Addr:    fmt.Sprintf(":%d", port),
-			Handler: m,
+			Addr:              fmt.Sprintf(":%d", port),
+			Handler:           m,
+			ReadTimeout:       defaultTimeout,
+			ReadHeaderTimeout: defaultTimeout,
+			WriteTimeout:      defaultTimeout,
 		},
 	}
 }
