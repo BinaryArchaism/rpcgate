@@ -1,14 +1,19 @@
 # RPCGate example config
 
-no_request_validation: false # default: false
-no_rpc_validation: false # default: false
+no_request_validation: false
+no_rpc_validation: false
 
 logger:
   level: debug
   format: inline
 
+metrics: 
+  enabled: true
+  port: 9090
+  path: /metrics
+
 clients:
-  auth_required: false # default: false
+  auth_required: false
   clients: 
     - login: admin
       password: test

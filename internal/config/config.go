@@ -19,8 +19,15 @@ type Config struct {
 	NoRPCValidation     bool    `yaml:"no_rpc_validation"`
 	Clients             Clients `yaml:"clients"`
 	Logger              Logger  `yaml:"logger"`
+	Metrics             Metrics `yaml:"metrics"`
 	RPCs                []RPC   `yaml:"rpcs"`
 	Port                string  `yaml:"port"`
+}
+
+type Metrics struct {
+	Enabled bool   `yaml:"enabled"`
+	Port    int64  `yaml:"port"`
+	Path    string `yaml:"path"`
 }
 
 type Clients struct {
