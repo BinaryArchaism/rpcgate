@@ -45,7 +45,7 @@ func New(cfg config.Config) *Server {
 	srv.metricsCfg = cfg.Metrics
 
 	handler := srv.recoverHandler(
-		srv.healtzProbeMidleware(
+		srv.healthzProbeMiddleware(
 			srv.loggingMiddleware(
 				srv.metricsMiddleware(
 					srv.authMiddleware(
@@ -113,7 +113,7 @@ func (srv *Server) handler(ctx *fasthttp.RequestCtx) {
 	if err != nil {
 		log.Error().Err(err).Msg("can not parse response")
 	}
-	SetJSONRPCResponceToCtx(ctx, response)
+	SetJSONRPCResponseToCtx(ctx, response)
 
 	_, err = io.Copy(ctx, bytes.NewReader(resp.Body()))
 	if err != nil {
@@ -281,7 +281,7 @@ func GetBasicAuthDecoded(header string) (string, string, error) {
 	return log, pass, nil
 }
 
-func (srv *Server) healtzProbeMidleware(f fasthttp.RequestHandler) fasthttp.RequestHandler {
+func (srv *Server) healthzProbeMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHandler {
 	const healthzProbePath = "/healthz"
 
 	return func(ctx *fasthttp.RequestCtx) {
