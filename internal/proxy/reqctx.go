@@ -70,9 +70,9 @@ func SetClientToReqCtx(ctx *fasthttp.RequestCtx, client string) {
 	})
 }
 
-// SetJSONRPCResponceToCtx sets the json-rpc response from node to
+// SetJSONRPCResponseToCtx sets the json-rpc response from node to
 // Response field in the given fasthttp.RequestCtx.
-func SetJSONRPCResponceToCtx(ctx *fasthttp.RequestCtx, response JSONRPCResponse) {
+func SetJSONRPCResponseToCtx(ctx *fasthttp.RequestCtx, response JSONRPCResponse) {
 	SetToReqCtx(ctx, func(rc *ReqCtx) {
 		rc.Response = response
 	})

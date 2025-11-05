@@ -63,7 +63,7 @@ func Test_ReqCtx(t *testing.T) {
 		require.NotEmpty(t, *gotReqCtx)
 		require.Equal(t, "test", gotReqCtx.Client)
 	})
-	t.Run("SetJSONRPCResponceToCtx", func(t *testing.T) {
+	t.Run("SetJSONRPCResponseToCtx", func(t *testing.T) {
 		req := &fasthttp.RequestCtx{}
 		resp := proxy.JSONRPCResponse{
 			Error: proxy.JSONRPCError{
@@ -71,7 +71,7 @@ func Test_ReqCtx(t *testing.T) {
 				Message: "error",
 			},
 		}
-		proxy.SetJSONRPCResponceToCtx(req, resp)
+		proxy.SetJSONRPCResponseToCtx(req, resp)
 		gotReqCtx := proxy.GetReqCtx(req)
 		require.NotEmpty(t, *gotReqCtx)
 		require.Equal(t, resp, gotReqCtx.Response)
