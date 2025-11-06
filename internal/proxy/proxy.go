@@ -98,6 +98,7 @@ func (srv *Server) handler(ctx *fasthttp.RequestCtx) {
 	req.SetRequestURI(provider.ConnURL)
 	req.SetBody(ctx.Request.Body())
 	req.Header.SetMethod(fasthttp.MethodPost)
+	req.Header.SetContentType("application/json")
 
 	resp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseResponse(resp)
@@ -120,6 +121,8 @@ func (srv *Server) handler(ctx *fasthttp.RequestCtx) {
 		log.Error().Err(err).Msg("error while request")
 		return
 	}
+	ctx.Response.SetStatusCode(resp.StatusCode())
+	resp.Header.CopyTo(&ctx.Response.Header)
 }
 
 func (srv *Server) recoverHandler(f fasthttp.RequestHandler) fasthttp.RequestHandler {
