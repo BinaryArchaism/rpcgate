@@ -17,19 +17,18 @@ import (
 
 func main() {
 	configPath := flag.String("config", "~/.config/rpcgate.yaml", "Path to config")
-
 	flag.Parse()
-
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
-	var apps []startstop.StartStop
 
 	cfg, err := config.ParseConfig(*configPath)
 	if err != nil {
 		log.Panic().Err(err).Str("config_path", *configPath).Msg("Failed to parse config")
 	}
 	logger.SetupLogger(cfg)
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	var apps []startstop.StartStop
 
 	srv := proxy.New(cfg)
 	apps = append(apps, srv)

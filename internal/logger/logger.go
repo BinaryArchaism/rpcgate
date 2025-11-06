@@ -30,7 +30,7 @@ func getLogWriter(cfg config.Config) io.Writer {
 
 	var writer io.Writer = os.Stdout
 	if cfg.Logger.Format != "json" {
-		writer = zerolog.ConsoleWriter{ //nolint:exhaustruct // logger setup
+		writer = zerolog.ConsoleWriter{
 			Out:        writer,
 			NoColor:    cfg.Logger.NoColor,
 			TimeFormat: time.RFC3339,
