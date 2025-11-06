@@ -104,8 +104,5 @@ type JSONRPCError struct {
 
 // HasError return false if JSONRPCResponse Error field is empty.
 func (j *JSONRPCResponse) HasError() bool {
-	return j.Error != JSONRPCError{
-		Code:    0,
-		Message: "",
-	}
+	return j.Error != JSONRPCError{}
 }

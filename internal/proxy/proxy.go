@@ -20,15 +20,14 @@ import (
 )
 
 type Server struct {
-	srv                 *fasthttp.Server
-	cli                 *fasthttp.Client
-	port                string
-	rr                  map[string]*balancer.RoundRobin
-	noRequestValidation bool
-	rpcs                []config.RPC
-	clients             config.Clients
-	metricsCfg          config.Metrics
-	done                chan struct{}
+	srv        *fasthttp.Server
+	cli        *fasthttp.Client
+	port       string
+	rr         map[string]*balancer.RoundRobin
+	rpcs       []config.RPC
+	clients    config.Clients
+	metricsCfg config.Metrics
+	done       chan struct{}
 }
 
 func New(cfg config.Config) *Server {
@@ -40,7 +39,6 @@ func New(cfg config.Config) *Server {
 	srv.port = cfg.Port
 	srv.done = make(chan struct{})
 	srv.rr = make(map[string]*balancer.RoundRobin)
-	srv.noRequestValidation = cfg.NoRequestValidation
 	srv.clients = cfg.Clients
 	srv.metricsCfg = cfg.Metrics
 
@@ -50,10 +48,9 @@ func New(cfg config.Config) *Server {
 				srv.metricsMiddleware(
 					srv.authMiddleware(
 						srv.routerHandler(
-							srv.requestValidationMiddleware(
-								srv.handler)))))))
+							srv.handler))))))
 
-	srv.srv = &fasthttp.Server{ //nolint: exhaustruct // server setup
+	srv.srv = &fasthttp.Server{
 		Handler: handler,
 	}
 
@@ -91,7 +88,7 @@ func (srv *Server) handler(ctx *fasthttp.RequestCtx) {
 	var request JSONRPCRequest
 	err := json.Unmarshal(ctx.Request.Body(), &request)
 	if err != nil {
-		log.Error().Err(err).Msg("can not parse request")
+		log.Error().Uint64("id", ctx.ID()).Err(err).Msg("can not parse request")
 	}
 	SetJSONRPCRequestToCtx(ctx, request)
 
@@ -105,20 +102,20 @@ func (srv *Server) handler(ctx *fasthttp.RequestCtx) {
 
 	err = srv.cli.Do(req, resp)
 	if err != nil {
-		log.Error().Err(err).Msg("error while request")
+		log.Error().Uint64("id", ctx.ID()).Err(err).Msg("error while request")
 		return
 	}
 
 	var response JSONRPCResponse
 	err = json.Unmarshal(resp.Body(), &response)
 	if err != nil {
-		log.Error().Err(err).Msg("can not parse response")
+		log.Error().Uint64("id", ctx.ID()).Err(err).Msg("can not parse response")
 	}
 	SetJSONRPCResponseToCtx(ctx, response)
 
 	_, err = io.Copy(ctx, bytes.NewReader(resp.Body()))
 	if err != nil {
-		log.Error().Err(err).Msg("error while request")
+		log.Error().Uint64("id", ctx.ID()).Err(err).Msg("error while request")
 		return
 	}
 	ctx.Response.SetStatusCode(resp.StatusCode())
@@ -129,7 +126,7 @@ func (srv *Server) recoverHandler(f fasthttp.RequestHandler) fasthttp.RequestHan
 	return func(ctx *fasthttp.RequestCtx) {
 		defer func() {
 			if r := recover(); r != nil {
-				log.Error().Any("panic", r).Stack().Msg("panic at handler")
+				log.Error().Uint64("id", ctx.ID()).Any("panic", r).Stack().Msg("panic at handler")
 				ctx.Error("internal server error", fasthttp.StatusInternalServerError)
 			}
 		}()
@@ -149,17 +146,6 @@ func (srv *Server) loggingMiddleware(f fasthttp.RequestHandler) fasthttp.Request
 			Str("latency", time.Since(start).String()).
 			Str("path", string(ctx.Request.RequestURI())).
 			Msg("request complete")
-	}
-}
-
-func (srv *Server) requestValidationMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHandler {
-	if srv.noRequestValidation {
-		return func(ctx *fasthttp.RequestCtx) {
-			f(ctx)
-		}
-	}
-	return func(ctx *fasthttp.RequestCtx) {
-		f(ctx)
 	}
 }
 
@@ -214,7 +200,7 @@ func (srv *Server) routerHandler(f fasthttp.RequestHandler) fasthttp.RequestHand
 	return func(ctx *fasthttp.RequestCtx) {
 		chainID, exist := chains[string(ctx.Request.RequestURI())]
 		if !exist {
-			log.Debug().Msg("unknown path")
+			log.Debug().Uint64("id", ctx.ID()).Msg("unknown path")
 			ctx.Error("not found", fasthttp.StatusNotFound)
 			return
 		}
@@ -241,7 +227,7 @@ func (srv *Server) authMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHan
 			return
 		}
 		if err != nil {
-			log.Error().Err(err).Msg("failed to decode basic auth")
+			log.Error().Uint64("id", ctx.ID()).Err(err).Msg("failed to decode basic auth")
 			ctx.Error("", fasthttp.StatusUnauthorized)
 			return
 		}

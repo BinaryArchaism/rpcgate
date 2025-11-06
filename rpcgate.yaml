@@ -1,6 +1,5 @@
 # RPCGate example config
 
-no_request_validation: false
 no_rpc_validation: false
 
 logger:

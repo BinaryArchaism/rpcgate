@@ -17,13 +17,12 @@ import (
 const defaultPort = ":8080"
 
 type Config struct {
-	NoRequestValidation bool    `yaml:"no_request_validation"`
-	NoRPCValidation     bool    `yaml:"no_rpc_validation"`
-	Clients             Clients `yaml:"clients"`
-	Logger              Logger  `yaml:"logger"`
-	Metrics             Metrics `yaml:"metrics"`
-	RPCs                []RPC   `yaml:"rpcs"`
-	Port                string  `yaml:"port"`
+	NoRPCValidation bool    `yaml:"no_rpc_validation"`
+	Clients         Clients `yaml:"clients"`
+	Logger          Logger  `yaml:"logger"`
+	Metrics         Metrics `yaml:"metrics"`
+	RPCs            []RPC   `yaml:"rpcs"`
+	Port            string  `yaml:"port"`
 }
 
 type Metrics struct {

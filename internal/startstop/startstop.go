@@ -22,7 +22,7 @@ func RunGracefull(ctx context.Context, srvs ...StartStop) {
 	}
 
 	<-ctx.Done()
-	log.Info().Msg("Stoping application")
+	log.Info().Msg("Stopping application")
 	timer := time.Tick(shutdownTimeout)
 	wg := sync.WaitGroup{}
 	for _, srv := range srvs {
