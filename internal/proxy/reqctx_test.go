@@ -65,11 +65,11 @@ func Test_ReqCtx(t *testing.T) {
 	})
 	t.Run("SetJSONRPCResponseToCtx", func(t *testing.T) {
 		req := &fasthttp.RequestCtx{}
-		resp := proxy.JSONRPCResponse{
-			Error: proxy.JSONRPCError{
+		resp := []proxy.JSONRPCResponse{
+			{Error: proxy.JSONRPCError{
 				Code:    123,
 				Message: "error",
-			},
+			}},
 		}
 		proxy.SetJSONRPCResponseToCtx(req, resp)
 		gotReqCtx := proxy.GetReqCtx(req)
@@ -88,8 +88,8 @@ func Test_ReqCtx(t *testing.T) {
 	})
 	t.Run("SetJSONRPCRequestToCtx", func(t *testing.T) {
 		req := &fasthttp.RequestCtx{}
-		jsonrpcreq := proxy.JSONRPCRequest{
-			Method: "test",
+		jsonrpcreq := []proxy.JSONRPCRequest{
+			{Method: "test"},
 		}
 		proxy.SetJSONRPCRequestToCtx(req, jsonrpcreq)
 		gotReqCtx := proxy.GetReqCtx(req)

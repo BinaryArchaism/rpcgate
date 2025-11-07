@@ -16,7 +16,7 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "~/.config/rpcgate.yaml", "Path to config")
+	configPath := flag.String("config", "", "Path to config")
 	flag.Parse()
 
 	cfg, err := config.ParseConfig(*configPath)
