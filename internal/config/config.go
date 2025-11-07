@@ -14,7 +14,10 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-const defaultPort = ":8080"
+const (
+	defaultPort       = ":8080"
+	deafultConfigPath = "/.config/rpcgate/rpcgate.yaml"
+)
 
 type Config struct {
 	NoRPCValidation bool    `yaml:"no_rpc_validation"`
@@ -61,6 +64,13 @@ type Provider struct {
 }
 
 func ParseConfig(path string) (Config, error) {
+	if path == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return Config{}, fmt.Errorf("can not get user home dit: %w", err)
+		}
+		path = home + deafultConfigPath
+	}
 	var cfg Config
 	ymlBytes, err := os.ReadFile(path)
 	if err != nil {
@@ -77,11 +87,7 @@ func ParseConfig(path string) (Config, error) {
 		return Config{}, fmt.Errorf("can not unmarshal yaml config file: %w", err)
 	}
 
-	if cfg.Port == "" {
-		cfg.Port = defaultPort
-	} else if !strings.HasPrefix(cfg.Port, ":") {
-		cfg.Port = ":" + cfg.Port
-	}
+	cfg.Port = getPort(cfg.Port)
 
 	err = validateConfig(cfg)
 	if err != nil {
@@ -96,6 +102,17 @@ func ParseConfig(path string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func getPort(port string) string {
+	if port == "" {
+		return defaultPort
+	}
+	if !strings.HasPrefix(port, ":") {
+		port = ":" + port
+	}
+
+	return port
 }
 
 func validateConfig(cfg Config) error {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -48,7 +49,8 @@ func New(cfg config.Config) *Server {
 				srv.metricsMiddleware(
 					srv.authMiddleware(
 						srv.routerHandler(
-							srv.handler))))))
+							srv.requestResponseParserMiddleware(
+								srv.handler)))))))
 
 	srv.srv = &fasthttp.Server{
 		Handler: handler,
@@ -78,19 +80,12 @@ func (srv *Server) Stop() {
 func (srv *Server) handler(ctx *fasthttp.RequestCtx) {
 	provider := srv.rr[string(ctx.RequestURI())].Next()
 
-	log.Debug().Uint64("id", ctx.ID()).Str("name", provider.Name).Msg("request goes to")
+	log.Debug().Uint64("request_id", ctx.ID()).Str("name", provider.Name).Msg("request goes to")
 
 	SetProviderToReqCtx(ctx, provider.Name)
 
 	req := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req)
-
-	var request JSONRPCRequest
-	err := json.Unmarshal(ctx.Request.Body(), &request)
-	if err != nil {
-		log.Error().Uint64("id", ctx.ID()).Err(err).Msg("can not parse request")
-	}
-	SetJSONRPCRequestToCtx(ctx, request)
 
 	req.SetRequestURI(provider.ConnURL)
 	req.SetBody(ctx.Request.Body())
@@ -100,22 +95,15 @@ func (srv *Server) handler(ctx *fasthttp.RequestCtx) {
 	resp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseResponse(resp)
 
-	err = srv.cli.Do(req, resp)
+	err := srv.cli.Do(req, resp)
 	if err != nil {
-		log.Error().Uint64("id", ctx.ID()).Err(err).Msg("error while request")
+		log.Error().Uint64("request_id", ctx.ID()).Err(err).Msg("error while request")
 		return
 	}
 
-	var response JSONRPCResponse
-	err = json.Unmarshal(resp.Body(), &response)
-	if err != nil {
-		log.Error().Uint64("id", ctx.ID()).Err(err).Msg("can not parse response")
-	}
-	SetJSONRPCResponseToCtx(ctx, response)
-
 	_, err = io.Copy(ctx, bytes.NewReader(resp.Body()))
 	if err != nil {
-		log.Error().Uint64("id", ctx.ID()).Err(err).Msg("error while request")
+		log.Error().Uint64("request_id", ctx.ID()).Err(err).Msg("error while request")
 		return
 	}
 	ctx.Response.SetStatusCode(resp.StatusCode())
@@ -126,7 +114,7 @@ func (srv *Server) recoverHandler(f fasthttp.RequestHandler) fasthttp.RequestHan
 	return func(ctx *fasthttp.RequestCtx) {
 		defer func() {
 			if r := recover(); r != nil {
-				log.Error().Uint64("id", ctx.ID()).Any("panic", r).Stack().Msg("panic at handler")
+				log.Error().Uint64("request_id", ctx.ID()).Any("panic", r).Stack().Msg("panic at handler")
 				ctx.Error("internal server error", fasthttp.StatusInternalServerError)
 			}
 		}()
@@ -139,7 +127,7 @@ func (srv *Server) loggingMiddleware(f fasthttp.RequestHandler) fasthttp.Request
 		start := time.Now()
 		f(ctx)
 		log.Info().
-			Uint64("id", ctx.ID()).
+			Uint64("request_id", ctx.ID()).
 			Uint64("conn_id", ctx.ConnID()).
 			Str("remote_ip", ctx.RemoteIP().String()).
 			Int("status", ctx.Response.StatusCode()).
@@ -150,6 +138,8 @@ func (srv *Server) loggingMiddleware(f fasthttp.RequestHandler) fasthttp.Request
 }
 
 func (srv *Server) metricsMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHandler {
+	const base = 10
+
 	if !srv.metricsCfg.Enabled {
 		return func(ctx *fasthttp.RequestCtx) {
 			f(ctx)
@@ -158,25 +148,43 @@ func (srv *Server) metricsMiddleware(f fasthttp.RequestHandler) fasthttp.Request
 
 	return func(ctx *fasthttp.RequestCtx) {
 		start := time.Now()
-
 		f(ctx)
+		latency := time.Since(start).Seconds()
 
 		reqctx := GetReqCtx(ctx)
-
-		const base = 10
 		chainID := strconv.FormatInt(reqctx.ChainID, base)
-		metrics.RequestLatencySeconds.WithLabelValues(
-			chainID, reqctx.ChainName, reqctx.Provider, reqctx.Request.Method, reqctx.Client).
-			Observe(time.Since(start).Seconds())
-		metrics.RequestTotalCounter.WithLabelValues(
-			chainID, reqctx.ChainName, reqctx.Provider, reqctx.Request.Method, reqctx.Client).Inc()
-		if reqctx.Response.HasError() {
-			metrics.ClientRequestError.WithLabelValues(
-				chainID, reqctx.ChainName, reqctx.Provider, reqctx.Request.Method, reqctx.Client).Inc()
+
+		if len(reqctx.Request) == 1 {
+			metrics.RequestLatencySeconds.WithLabelValues(
+				chainID, reqctx.ChainName, reqctx.Provider, reqctx.Request[0].Method, reqctx.Client).
+				Observe(latency)
+			metrics.RequestTotalCounter.WithLabelValues(
+				chainID, reqctx.ChainName, reqctx.Provider, reqctx.Request[0].Method, reqctx.Client).Inc()
+			if reqctx.Response[0].HasError() {
+				metrics.ClientRequestError.WithLabelValues(
+					chainID, reqctx.ChainName, reqctx.Provider, reqctx.Request[0].Method, reqctx.Client).Inc()
+			}
+			if ctx.Response.StatusCode() != fasthttp.StatusOK {
+				metrics.RequestError.WithLabelValues(
+					chainID, reqctx.ChainName, reqctx.Provider, reqctx.Request[0].Method, reqctx.Client).Inc()
+			}
+			return
 		}
+
+		metrics.RequestLatencySeconds.WithLabelValues(
+			chainID, reqctx.ChainName, reqctx.Provider, "batch", reqctx.Client).
+			Observe(latency)
 		if ctx.Response.StatusCode() != fasthttp.StatusOK {
 			metrics.RequestError.WithLabelValues(
-				chainID, reqctx.ChainName, reqctx.Provider, reqctx.Request.Method, reqctx.Client).Inc()
+				chainID, reqctx.ChainName, reqctx.Provider, "batch", reqctx.Client).Inc()
+		}
+		for i := range len(reqctx.Request) {
+			metrics.RequestTotalCounter.WithLabelValues(
+				chainID, reqctx.ChainName, reqctx.Provider, reqctx.Request[i].Method, reqctx.Client).Inc()
+			if reqctx.Response[i].HasError() {
+				metrics.ClientRequestError.WithLabelValues(
+					chainID, reqctx.ChainName, reqctx.Provider, reqctx.Request[i].Method, reqctx.Client).Inc()
+			}
 		}
 	}
 }
@@ -200,7 +208,7 @@ func (srv *Server) routerHandler(f fasthttp.RequestHandler) fasthttp.RequestHand
 	return func(ctx *fasthttp.RequestCtx) {
 		chainID, exist := chains[string(ctx.Request.RequestURI())]
 		if !exist {
-			log.Debug().Uint64("id", ctx.ID()).Msg("unknown path")
+			log.Debug().Uint64("request_id", ctx.ID()).Msg("unknown path")
 			ctx.Error("not found", fasthttp.StatusNotFound)
 			return
 		}
@@ -227,14 +235,14 @@ func (srv *Server) authMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHan
 			return
 		}
 		if err != nil {
-			log.Error().Uint64("id", ctx.ID()).Err(err).Msg("failed to decode basic auth")
+			log.Error().Uint64("request_id", ctx.ID()).Err(err).Msg("failed to decode basic auth")
 			ctx.Error("", fasthttp.StatusUnauthorized)
 			return
 		}
 		expectedPass, exist := loginToPass[login]
 		if !exist {
 			log.Info().
-				Uint64("id", ctx.ID()).
+				Uint64("request_id", ctx.ID()).
 				Uint64("conn_id", ctx.ConnID()).
 				Err(err).Msg("invalid login")
 			ctx.Error("", fasthttp.StatusUnauthorized)
@@ -242,7 +250,7 @@ func (srv *Server) authMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHan
 		}
 		if expectedPass != pass {
 			log.Info().
-				Uint64("id", ctx.ID()).
+				Uint64("request_id", ctx.ID()).
 				Uint64("conn_id", ctx.ConnID()).
 				Err(err).Msg("invalid pass")
 			ctx.Error("", fasthttp.StatusUnauthorized)
@@ -282,4 +290,63 @@ func (srv *Server) healthzProbeMiddleware(f fasthttp.RequestHandler) fasthttp.Re
 		ctx.Response.SetStatusCode(fasthttp.StatusOK)
 		ctx.Response.SetBodyString("ok")
 	}
+}
+
+func (srv *Server) requestResponseParserMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		isBatched, err := isBodyArray(ctx.Request.Body())
+		if err != nil {
+			log.Info().Uint64("request_id", ctx.ID()).Err(err).Msg("can not parse body")
+		}
+
+		var request []JSONRPCRequest
+		if isBatched {
+			err = json.Unmarshal(ctx.Request.Body(), &request)
+			if err != nil {
+				log.Error().Uint64("request_id", ctx.ID()).Err(err).Msg("can not parse request")
+			}
+		} else {
+			var singleReq JSONRPCRequest
+			err = json.Unmarshal(ctx.Request.Body(), &singleReq)
+			if err != nil {
+				log.Error().Uint64("request_id", ctx.ID()).Err(err).Msg("can not parse request")
+			}
+			request = append(request, singleReq)
+		}
+		SetJSONRPCRequestToCtx(ctx, request)
+
+		f(ctx)
+
+		var response []JSONRPCResponse
+		if isBatched {
+			err = json.Unmarshal(ctx.Response.Body(), &response)
+			if err != nil {
+				log.Error().Uint64("request_id", ctx.ID()).Err(err).Msg("can not parse response")
+			}
+		} else {
+			var singleResp JSONRPCResponse
+			err = json.Unmarshal(ctx.Response.Body(), &singleResp)
+			if err != nil {
+				log.Error().Uint64("request_id", ctx.ID()).Err(err).Msg("can not parse response")
+			}
+			response = append(response, singleResp)
+		}
+		SetJSONRPCResponseToCtx(ctx, response)
+	}
+}
+
+func isBodyArray(body []byte) (bool, error) {
+	body = bytes.TrimSpace(body)
+	body = bytes.TrimPrefix(body, []byte("\xef\xbb\xbf"))
+	if len(body) == 0 {
+		return false, errors.New("body is empty after space trim")
+	}
+	if body[0] == '[' {
+		return true, nil
+	}
+	if body[0] == '{' {
+		return false, nil
+	}
+
+	return false, errors.New("body is invalid")
 }

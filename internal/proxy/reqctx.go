@@ -8,8 +8,8 @@ const userValueKey = "rpcgate.reqctx"
 // ReqCtx carries request-scoped metadata used for metrics and logging.
 // It is progressively filled by middlewares during request handling.
 type ReqCtx struct {
-	Request  JSONRPCRequest  // json-rpc request from client
-	Response JSONRPCResponse // json-rpc response from node
+	Request  []JSONRPCRequest  // json-rpc request from client
+	Response []JSONRPCResponse // json-rpc response from node
 
 	Client    string // login from basic auth
 	ChainID   int64  // chainID from path
@@ -72,7 +72,7 @@ func SetClientToReqCtx(ctx *fasthttp.RequestCtx, client string) {
 
 // SetJSONRPCResponseToCtx sets the json-rpc response from node to
 // Response field in the given fasthttp.RequestCtx.
-func SetJSONRPCResponseToCtx(ctx *fasthttp.RequestCtx, response JSONRPCResponse) {
+func SetJSONRPCResponseToCtx(ctx *fasthttp.RequestCtx, response []JSONRPCResponse) {
 	SetToReqCtx(ctx, func(rc *ReqCtx) {
 		rc.Response = response
 	})
@@ -80,7 +80,7 @@ func SetJSONRPCResponseToCtx(ctx *fasthttp.RequestCtx, response JSONRPCResponse)
 
 // SetJSONRPCRequestToCtx sets the json-rpc request from client to
 // Request field in the given fasthttp.RequestCtx.
-func SetJSONRPCRequestToCtx(ctx *fasthttp.RequestCtx, request JSONRPCRequest) {
+func SetJSONRPCRequestToCtx(ctx *fasthttp.RequestCtx, request []JSONRPCRequest) {
 	SetToReqCtx(ctx, func(rc *ReqCtx) {
 		rc.Request = request
 	})
