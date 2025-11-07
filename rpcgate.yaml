@@ -12,10 +12,7 @@ metrics:
   path: /metrics
 
 clients:
-  auth_required: false
-  clients: 
-    - login: admin
-      password: test
+  type: basic # [basic, query]
 
 rpcs:
   - name: mainnet

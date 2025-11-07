@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -78,7 +79,7 @@ func (srv *Server) Stop() {
 }
 
 func (srv *Server) handler(ctx *fasthttp.RequestCtx) {
-	provider := srv.rr[string(ctx.RequestURI())].Next()
+	provider := srv.rr[string(ctx.Path())].Next()
 
 	log.Debug().Uint64("request_id", ctx.ID()).Str("name", provider.Name).Msg("request goes to")
 
@@ -114,7 +115,12 @@ func (srv *Server) recoverHandler(f fasthttp.RequestHandler) fasthttp.RequestHan
 	return func(ctx *fasthttp.RequestCtx) {
 		defer func() {
 			if r := recover(); r != nil {
-				log.Error().Uint64("request_id", ctx.ID()).Any("panic", r).Stack().Msg("panic at handler")
+				stack := debug.Stack()
+				log.Error().
+					Uint64("request_id", ctx.ID()).
+					Bytes("stack", stack).
+					Any("panic", r).
+					Msg("panic at handler")
 				ctx.Error("internal server error", fasthttp.StatusInternalServerError)
 			}
 		}()
@@ -126,14 +132,17 @@ func (srv *Server) loggingMiddleware(f fasthttp.RequestHandler) fasthttp.Request
 	return func(ctx *fasthttp.RequestCtx) {
 		start := time.Now()
 		f(ctx)
+
+		reqctx := GetReqCtx(ctx)
 		log.Info().
 			Uint64("request_id", ctx.ID()).
 			Uint64("conn_id", ctx.ConnID()).
 			Str("remote_ip", ctx.RemoteIP().String()).
 			Int("status", ctx.Response.StatusCode()).
 			Str("latency", time.Since(start).String()).
-			Str("path", string(ctx.Request.RequestURI())).
-			Msg("request complete")
+			Str("path", string(ctx.Path())).
+			Str("client", reqctx.Client).
+			Msg("request completed")
 	}
 }
 
@@ -206,7 +215,7 @@ func (srv *Server) routerHandler(f fasthttp.RequestHandler) fasthttp.RequestHand
 	}
 
 	return func(ctx *fasthttp.RequestCtx) {
-		chainID, exist := chains[string(ctx.Request.RequestURI())]
+		chainID, exist := chains[string(ctx.Path())]
 		if !exist {
 			log.Debug().Uint64("request_id", ctx.ID()).Msg("unknown path")
 			ctx.Error("not found", fasthttp.StatusNotFound)
@@ -224,6 +233,18 @@ func (srv *Server) authMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHan
 	for _, c := range srv.clients.Clients {
 		loginToPass[c.Login] = c.Password
 	}
+
+	if srv.clients.Type == "query" {
+		return func(ctx *fasthttp.RequestCtx) {
+			c := string(ctx.QueryArgs().Peek("client"))
+			if c == "" {
+				c = "_unknown_"
+			}
+			SetClientToReqCtx(ctx, c)
+			f(ctx)
+		}
+	}
+
 	return func(ctx *fasthttp.RequestCtx) {
 		header := ctx.Request.Header.Peek(authHeaderName)
 		login, pass, err := GetBasicAuthDecoded(string(header))
@@ -282,7 +303,7 @@ func (srv *Server) healthzProbeMiddleware(f fasthttp.RequestHandler) fasthttp.Re
 	const healthzProbePath = "/healthz"
 
 	return func(ctx *fasthttp.RequestCtx) {
-		if string(ctx.Request.RequestURI()) != healthzProbePath {
+		if string(ctx.Path()) != healthzProbePath {
 			f(ctx)
 			return
 		}

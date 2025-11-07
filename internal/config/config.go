@@ -36,6 +36,7 @@ type Metrics struct {
 
 type Clients struct {
 	AuthRequired bool     `yaml:"auth_required"`
+	Type         string   `yaml:"type"`
 	Clients      []Client `yaml:"clients"`
 }
 
@@ -125,6 +126,11 @@ func validateConfig(cfg Config) error {
 	case "", "stdout", "none":
 	default:
 		return errors.New("Logger.Writer incorrect, should be on of 'stdout', 'none' or empty")
+	}
+	switch cfg.Clients.Type {
+	case "", "basic", "query":
+	default:
+		return errors.New("Clients.Type incorrect, should be on of 'basic', 'query' or empty")
 	}
 
 	return nil
