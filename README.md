@@ -16,10 +16,22 @@ It increases reliability, provides unified access across chains, and exposes met
 - **Metrics** — observe provider latency, error rates and usage.  
 - **Client tracking** — per-application statistics.  
 
-
 ### 🚀 Quick start
 
-WIP
+1. Clone repo.
+    ```
+    git clone https://github.com/BinaryArchaism/rpcgate.git
+    cd rpcgate
+    ```
+2. Create config file.
+3. Build an image.
+    ```
+    docker build -t rpcgate .
+    ```
+4. Run it.
+    ```
+    docker run -p port:8080 -v your-config-path:/config.yaml [-d] rpcgate
+    ```
 
 #### Client tracking options
 rpcgate can identify requests by client using either Basic Auth or a query parameter,
@@ -33,14 +45,14 @@ so you can track metrics per application without changing any code.
         - login: admin
           password: test   # optional
     ```
-    Connection string example: 
+    Connection string examples: 
     - https://admin:test@rpcgate-url/1
     - https://admin:@rpcgate-url/1
     - https://admin@rpcgate-url/1
 
-    > If you don’t need a password, omit it.
+    If you don’t need a password, omit it.
     
-    > Some libraries (e.g. Web3.py) require a colon (:) after the username even if no password is used.
+    > 📝 **Note:** Some SDKs (like Web3.py) require a colon `:` after username even if no password is set.
 
 - **Query parameter**
     ```yaml
