@@ -65,11 +65,12 @@ func New(cfg config.Config) *Server {
 				Name: provider.Name,
 			})
 		}
+		key := "/" + rpc.Name
 		switch rpc.BalancerType {
 		case "p2cewma":
 			localInited := rpc.P2CEWMA != config.P2CEWMAConfig{}
 			if localInited {
-				srv.chainToP2CEWMA[fmt.Sprintf("/%d", rpc.ChainID)] = balancer.NewP2CEWMA(
+				srv.chainToP2CEWMA[key] = balancer.NewP2CEWMA(
 					payload,
 					rpc.P2CEWMA.Smooth,
 					rpc.P2CEWMA.LoadNormalizer,
@@ -79,7 +80,7 @@ func New(cfg config.Config) *Server {
 				continue
 			}
 			if p2cewmaGlobalInited {
-				srv.chainToP2CEWMA[fmt.Sprintf("/%d", rpc.ChainID)] = balancer.NewP2CEWMA(
+				srv.chainToP2CEWMA[key] = balancer.NewP2CEWMA(
 					payload,
 					cfg.P2CEWMA.Smooth,
 					cfg.P2CEWMA.LoadNormalizer,
@@ -88,9 +89,9 @@ func New(cfg config.Config) *Server {
 				)
 				continue
 			}
-			srv.chainToP2CEWMA[fmt.Sprintf("/%d", rpc.ChainID)] = balancer.NewP2CEWMADefault(payload)
+			srv.chainToP2CEWMA[key] = balancer.NewP2CEWMADefault(payload)
 		case "round-robin":
-			srv.chainToRR[fmt.Sprintf("/%d", rpc.ChainID)] = balancer.NewRoundRobin(payload)
+			srv.chainToRR[key] = balancer.NewRoundRobin(payload)
 		}
 	}
 
@@ -203,11 +204,11 @@ func (srv *Server) metricsMiddleware(f fasthttp.RequestHandler) fasthttp.Request
 
 		if len(reqctx.Request) == 1 {
 			metrics.RequestLatencySeconds.WithLabelValues(
-				chainID, reqctx.ChainName, reqctx.Provider, reqctx.Balancer, reqctx.Request[0].Method, reqctx.Client).
+				chainID, reqctx.RPCName, reqctx.Provider, reqctx.Balancer, reqctx.Request[0].Method, reqctx.Client).
 				Observe(latency)
 			metrics.RequestTotalCounter.WithLabelValues(
 				chainID,
-				reqctx.ChainName,
+				reqctx.RPCName,
 				reqctx.Provider,
 				reqctx.Balancer,
 				reqctx.Request[0].Method,
@@ -216,7 +217,7 @@ func (srv *Server) metricsMiddleware(f fasthttp.RequestHandler) fasthttp.Request
 			if reqctx.Response[0].HasError() {
 				metrics.ClientRequestError.WithLabelValues(
 					chainID,
-					reqctx.ChainName,
+					reqctx.RPCName,
 					reqctx.Provider,
 					reqctx.Balancer,
 					reqctx.Request[0].Method,
@@ -226,7 +227,7 @@ func (srv *Server) metricsMiddleware(f fasthttp.RequestHandler) fasthttp.Request
 			if ctx.Response.StatusCode() != fasthttp.StatusOK {
 				metrics.RequestError.WithLabelValues(
 					chainID,
-					reqctx.ChainName,
+					reqctx.RPCName,
 					reqctx.Provider,
 					reqctx.Balancer,
 					reqctx.Request[0].Method,
@@ -237,16 +238,16 @@ func (srv *Server) metricsMiddleware(f fasthttp.RequestHandler) fasthttp.Request
 		}
 
 		metrics.RequestLatencySeconds.WithLabelValues(
-			chainID, reqctx.ChainName, reqctx.Provider, reqctx.Balancer, "batch", reqctx.Client).
+			chainID, reqctx.RPCName, reqctx.Provider, reqctx.Balancer, "batch", reqctx.Client).
 			Observe(latency)
 		if ctx.Response.StatusCode() != fasthttp.StatusOK {
 			metrics.RequestError.WithLabelValues(
-				chainID, reqctx.ChainName, reqctx.Balancer, reqctx.Provider, "batch", reqctx.Client).Inc()
+				chainID, reqctx.RPCName, reqctx.Balancer, reqctx.Provider, "batch", reqctx.Client).Inc()
 		}
 		for i := range len(reqctx.Request) {
 			metrics.RequestTotalCounter.WithLabelValues(
 				chainID,
-				reqctx.ChainName,
+				reqctx.RPCName,
 				reqctx.Provider,
 				reqctx.Balancer,
 				reqctx.Request[i].Method,
@@ -255,7 +256,7 @@ func (srv *Server) metricsMiddleware(f fasthttp.RequestHandler) fasthttp.Request
 			if reqctx.Response[i].HasError() {
 				metrics.ClientRequestError.WithLabelValues(
 					chainID,
-					reqctx.ChainName,
+					reqctx.RPCName,
 					reqctx.Provider,
 					reqctx.Balancer,
 					reqctx.Request[i].Method,
@@ -267,27 +268,20 @@ func (srv *Server) metricsMiddleware(f fasthttp.RequestHandler) fasthttp.Request
 }
 
 func (srv *Server) routerHandler(f fasthttp.RequestHandler) fasthttp.RequestHandler {
-	const base = 10
-	chainToConnUrls := make(map[string][]config.Provider)
-	chains := make(map[string]int64)
-	chainIDToName := make(map[int64]string)
-
+	nameToChainID := make(map[string]int64)
 	for _, rpc := range srv.rpcs {
-		key := "/" + strconv.FormatInt(rpc.ChainID, base)
-		chains[key] = rpc.ChainID
-		chainIDToName[rpc.ChainID] = rpc.Name
-		chainToConnUrls[key] = append(chainToConnUrls[key], rpc.Providers...)
+		nameToChainID["/"+rpc.Name] = rpc.ChainID
 	}
 
 	return func(ctx *fasthttp.RequestCtx) {
-		chainID, exist := chains[string(ctx.Path())]
+		chainID, exist := nameToChainID[string(ctx.Path())]
 		if !exist {
 			log.Debug().Uint64("request_id", ctx.ID()).Msg("unknown path")
 			ctx.Error("not found", fasthttp.StatusNotFound)
 			return
 		}
 		SetChainIDToReqCtx(ctx, chainID)
-		SetChainNameToReqCtx(ctx, chainIDToName[chainID])
+		SetRPCNameToReqCtx(ctx, strings.TrimPrefix(string(ctx.Path()), "/"))
 		f(ctx)
 	}
 }
@@ -438,15 +432,13 @@ func isBodyArray(body []byte) (bool, error) {
 }
 
 func (srv *Server) loadBalancerMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHandler {
-	const base = 10
-	chainToLBAlgo := make(map[string]string)
+	nameToLBAlgo := make(map[string]string)
 	for _, rpc := range srv.rpcs {
-		key := "/" + strconv.FormatInt(rpc.ChainID, base)
-		chainToLBAlgo[key] = rpc.BalancerType
+		nameToLBAlgo["/"+rpc.Name] = rpc.BalancerType
 	}
 
 	return func(ctx *fasthttp.RequestCtx) {
-		switch chainToLBAlgo[string(ctx.Path())] {
+		switch nameToLBAlgo[string(ctx.Path())] {
 		case "p2cewma":
 			SetBalancerToCtx(ctx, "p2cewma")
 			srv.proccessP2CEWMA(ctx, f)

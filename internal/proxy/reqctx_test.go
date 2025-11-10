@@ -49,12 +49,12 @@ func Test_ReqCtx(t *testing.T) {
 		require.NotEmpty(t, *gotReqCtx)
 		require.Equal(t, int64(123), gotReqCtx.ChainID)
 	})
-	t.Run("SetChainNameToReqCtx", func(t *testing.T) {
+	t.Run("SetRPCNameToReqCtx", func(t *testing.T) {
 		req := &fasthttp.RequestCtx{}
-		proxy.SetChainNameToReqCtx(req, "test")
+		proxy.SetRPCNameToReqCtx(req, "test")
 		gotReqCtx := proxy.GetReqCtx(req)
 		require.NotEmpty(t, *gotReqCtx)
-		require.Equal(t, "test", gotReqCtx.ChainName)
+		require.Equal(t, "test", gotReqCtx.RPCName)
 	})
 	t.Run("SetClientToReqCtx", func(t *testing.T) {
 		req := &fasthttp.RequestCtx{}

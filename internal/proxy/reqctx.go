@@ -13,11 +13,11 @@ type ReqCtx struct {
 
 	ConnURL string // provider connection url choiced by balanacer
 
-	Balancer  string // load balancing algorithm for request
-	Client    string // login from basic auth
-	ChainID   int64  // chainID from path
-	ChainName string // chain name from config
-	Provider  string // provider from config
+	Balancer string // load balancing algorithm for request
+	Client   string // login from basic auth
+	ChainID  int64  // chainID from path
+	RPCName  string // rpc name from config
+	Provider string // provider from config
 }
 
 // SetToCtx stores the ReqCtx in the given fasthttp.RequestCtx.
@@ -59,10 +59,10 @@ func SetChainIDToReqCtx(ctx *fasthttp.RequestCtx, chainID int64) {
 	})
 }
 
-// SetChainNameToReqCtx sets the chain name field in the given fasthttp.RequestCtx.
-func SetChainNameToReqCtx(ctx *fasthttp.RequestCtx, chainName string) {
+// SetRPCNameToReqCtx sets the rpc name field in the given fasthttp.RequestCtx.
+func SetRPCNameToReqCtx(ctx *fasthttp.RequestCtx, rpcName string) {
 	SetToReqCtx(ctx, func(rc *ReqCtx) {
-		rc.ChainName = chainName
+		rc.RPCName = rpcName
 	})
 }
 

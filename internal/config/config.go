@@ -144,7 +144,13 @@ func validateConfig(cfg Config) error {
 		return errors.New("Clients.Type incorrect, should be on of 'basic', 'query' or empty")
 	}
 
+	names := make(map[string]struct{})
 	for i, rpc := range cfg.RPCs {
+		_, exist := names[rpc.Name]
+		if exist {
+			return fmt.Errorf("RPC[%s].Name in not unique", rpc.Name)
+		}
+
 		switch rpc.BalancerType {
 		case "":
 			cfg.RPCs[i].BalancerType = "p2cewma"

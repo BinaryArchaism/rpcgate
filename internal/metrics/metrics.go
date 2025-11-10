@@ -30,22 +30,22 @@ var (
 		Name:      "request_latency_seconds",
 		Help:      "Request latency distribution in seconds",
 		Buckets:   []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5},
-	}, []string{"chain_id", "chain_name", "provider", "balancer", "method", "client"})
+	}, []string{"chain_id", "rpc_name", "provider", "balancer", "method", "client"})
 	RequestTotalCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "request_total",
 		Help:      "Request total",
-	}, []string{"chain_id", "chain_name", "provider", "balancer", "method", "client"})
+	}, []string{"chain_id", "rpc_name", "provider", "balancer", "method", "client"})
 	RequestError = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "request_error_total",
 		Help:      "Request error total",
-	}, []string{"chain_id", "chain_name", "provider", "balancer", "method", "client"})
+	}, []string{"chain_id", "rpc_name", "provider", "balancer", "method", "client"})
 	ClientRequestError = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "client_request_error_total",
 		Help:      "Client request error total",
-	}, []string{"chain_id", "chain_name", "provider", "balancer", "method", "client"})
+	}, []string{"chain_id", "rpc_name", "provider", "balancer", "method", "client"})
 )
 
 type Server struct {
