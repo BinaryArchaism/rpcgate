@@ -18,6 +18,11 @@ rpcs:
   - name: mainnet
     chain_id: 1
     balancer_type: p2cewma
+    p2cewma:
+      smooth: 0.5
+      load_normalizer: 16
+      penalty_decay: 0.5
+      cooldown_timeout: 5s
     providers:
       - name: tenderly
         conn_url: https://gateway.tenderly.co/public/mainnet
@@ -31,3 +36,10 @@ rpcs:
         conn_url: https://base-rpc.publicnode.com
       - name: tenderly
         conn_url: https://base.gateway.tenderly.co
+
+# default
+p2cewma:
+  smooth: 0.3
+  load_normalizer: 8
+  penalty_decay: 0.8
+  cooldown_timeout: 10s

@@ -33,13 +33,13 @@ It increases reliability, provides unified access across chains, and exposes met
     docker run -p port:8080 -v your-config-path:/config.yaml [-d] rpcgate
     ```
 
-### Load balancing options
+#### Load balancing options
 - **p2cewma**
   Adaptive algorithm based on Exponentially Weighted Moving Average (EWMA) latency, in-flight load, and penalties for providers errors.
 - **round-robin**
   Simple rotation of requests across providers.
 
-> #### **p2cewma** is a default option.
+> **p2cewma** is a default option.
 > The p2cewma algorithm automatically adapts to provider latency and reliability, giving higher throughput under variable RPC conditions.
 
 To configure a balancing strategy, specify it per-chain in your config:
@@ -50,6 +50,36 @@ rpcs:
   - name: base
     # omit balancer_type to use default (p2cewma)
 ```
+
+##### p2cewma configuration
+You can define global defaults or override them per-RPC when using this load-balancing algorithm:
+```yaml
+p2cewma: # global
+  smooth: 0.3
+  load_normalizer: 8
+  penalty_decay: 0.8
+  cooldown_timeout: 10s
+
+rpcs:
+  - name: base
+    chain_id: 8453
+    p2cewma: # local
+      smooth: 0.5
+      load_normalizer: 16
+      penalty_decay: 0.5
+      cooldown_timeout: 5s
+    providers:
+      ...
+```
+Option explained: 
+- `smooth` - [0;1] controls how quickly latency changes affect the score.
+  Higher values → faster adaptation, lower values → smoother response.
+- `load_normalizer` - >0 reduces load on already busy providers.
+  Smaller values make the balancer avoid heavily loaded RPCs more aggressively.
+- `penalty_decay` - [0;1] defines how quickly an error penalty fades.
+  Lower values mean a provider stays “punished” for longer after a failure.
+- `cooldown_timeout` - duration for which a provider stays inactive after an error.
+  Example: 10s, 30s, 1m.
 
 #### Client tracking options
 rpcgate can identify requests by client using either Basic Auth or a query parameter,
