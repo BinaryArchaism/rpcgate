@@ -56,6 +56,7 @@ func New(cfg config.Config) *Server {
 								srv.requestResponseParserMiddleware(
 									srv.handler))))))))
 
+	p2cewmaGlobalInited := cfg.P2CEWMA != config.P2CEWMAConfig{}
 	for _, rpc := range cfg.RPCs {
 		payload := make([]balancer.Payload, 0, len(rpc.Providers))
 		for _, provider := range rpc.Providers {
@@ -66,6 +67,27 @@ func New(cfg config.Config) *Server {
 		}
 		switch rpc.BalancerType {
 		case "p2cewma":
+			localInited := rpc.P2CEWMA != config.P2CEWMAConfig{}
+			if localInited {
+				srv.chainToP2CEWMA[fmt.Sprintf("/%d", rpc.ChainID)] = balancer.NewP2CEWMA(
+					payload,
+					rpc.P2CEWMA.Smooth,
+					rpc.P2CEWMA.LoadNormalizer,
+					rpc.P2CEWMA.PenaltyDecay,
+					rpc.P2CEWMA.CooldownTimeout,
+				)
+				continue
+			}
+			if p2cewmaGlobalInited {
+				srv.chainToP2CEWMA[fmt.Sprintf("/%d", rpc.ChainID)] = balancer.NewP2CEWMA(
+					payload,
+					cfg.P2CEWMA.Smooth,
+					cfg.P2CEWMA.LoadNormalizer,
+					cfg.P2CEWMA.PenaltyDecay,
+					cfg.P2CEWMA.CooldownTimeout,
+				)
+				continue
+			}
 			srv.chainToP2CEWMA[fmt.Sprintf("/%d", rpc.ChainID)] = balancer.NewP2CEWMADefault(payload)
 		case "round-robin":
 			srv.chainToRR[fmt.Sprintf("/%d", rpc.ChainID)] = balancer.NewRoundRobin(payload)

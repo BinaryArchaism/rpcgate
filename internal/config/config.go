@@ -7,6 +7,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/goccy/go-yaml"
@@ -20,12 +21,13 @@ const (
 )
 
 type Config struct {
-	NoRPCValidation bool    `yaml:"no_rpc_validation"`
-	Clients         Clients `yaml:"clients"`
-	Logger          Logger  `yaml:"logger"`
-	Metrics         Metrics `yaml:"metrics"`
-	RPCs            []RPC   `yaml:"rpcs"`
-	Port            string  `yaml:"port"`
+	NoRPCValidation bool          `yaml:"no_rpc_validation"`
+	P2CEWMA         P2CEWMAConfig `yaml:"p2cewma"`
+	Clients         Clients       `yaml:"clients"`
+	Logger          Logger        `yaml:"logger"`
+	Metrics         Metrics       `yaml:"metrics"`
+	RPCs            []RPC         `yaml:"rpcs"`
+	Port            string        `yaml:"port"`
 }
 
 type Metrics struct {
@@ -53,15 +55,23 @@ type Logger struct {
 }
 
 type RPC struct {
-	Name         string     `yaml:"name"`
-	ChainID      int64      `yaml:"chain_id"`
-	BalancerType string     `yaml:"balancer_type"`
-	Providers    []Provider `yaml:"providers"`
+	Name         string        `yaml:"name"`
+	ChainID      int64         `yaml:"chain_id"`
+	BalancerType string        `yaml:"balancer_type"`
+	P2CEWMA      P2CEWMAConfig `yaml:"p2cewma"`
+	Providers    []Provider    `yaml:"providers"`
 }
 
 type Provider struct {
 	Name    string `yaml:"name"`
 	ConnURL string `yaml:"conn_url"`
+}
+
+type P2CEWMAConfig struct {
+	Smooth          float64       `yaml:"smooth"`
+	LoadNormalizer  float64       `yaml:"load_normalizer"`
+	PenaltyDecay    float64       `yaml:"penalty_decay"`
+	CooldownTimeout time.Duration `yaml:"cooldown_timeout"`
 }
 
 func ParseConfig(path string) (Config, error) {
@@ -145,6 +155,32 @@ func validateConfig(cfg Config) error {
 				rpc.Name,
 			)
 		}
+	}
+
+	err := validateP2CEWMA(cfg.P2CEWMA)
+	if err != nil {
+		return fmt.Errorf("global p2cewma config is invalid: %w", err)
+	}
+
+	for _, rpc := range cfg.RPCs {
+		err = validateP2CEWMA(rpc.P2CEWMA)
+		if err != nil {
+			return fmt.Errorf("RPC[%s].P2CEWMA config is invalid: %w", rpc.Name, err)
+		}
+	}
+
+	return nil
+}
+
+func validateP2CEWMA(cfg P2CEWMAConfig) error {
+	if cfg.Smooth < 0 || cfg.Smooth > 1 {
+		return fmt.Errorf("P2CEWMAConfig.Smooth incorrect, should be [0;1], got: %f", cfg.Smooth)
+	}
+	if cfg.PenaltyDecay < 0 || cfg.PenaltyDecay > 1 {
+		return fmt.Errorf("P2CEWMAConfig.PenaltyDecay incorrect, should be [0;1], got: %f", cfg.PenaltyDecay)
+	}
+	if cfg.LoadNormalizer < 0 {
+		return fmt.Errorf("P2CEWMAConfig.LoadNormalizer incorrect, should be > 0, got: %f", cfg.LoadNormalizer)
 	}
 
 	return nil
