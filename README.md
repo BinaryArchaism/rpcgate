@@ -33,6 +33,24 @@ It increases reliability, provides unified access across chains, and exposes met
     docker run -p port:8080 -v your-config-path:/config.yaml [-d] rpcgate
     ```
 
+### Load balancing options
+- **p2cewma**
+  Adaptive algorithm based on Exponentially Weighted Moving Average (EWMA) latency, in-flight load, and penalties for providers errors.
+- **round-robin**
+  Simple rotation of requests across providers.
+
+> #### **p2cewma** is a default option.
+> The p2cewma algorithm automatically adapts to provider latency and reliability, giving higher throughput under variable RPC conditions.
+
+To configure a balancing strategy, specify it per-chain in your config:
+```yaml 
+rpcs:
+  - name: mainnet
+    balancer_type: p2cewma # [p2cewma, round-robin]
+  - name: base
+    # omit balancer_type to use default (p2cewma)
+```
+
 #### Client tracking options
 rpcgate can identify requests by client using either Basic Auth or a query parameter,
 so you can track metrics per application without changing any code.
