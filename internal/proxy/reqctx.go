@@ -11,6 +11,8 @@ type ReqCtx struct {
 	Request  []JSONRPCRequest  // json-rpc request from client
 	Response []JSONRPCResponse // json-rpc response from node
 
+	ConnURL string // provider connection url choiced by balanacer
+
 	Client    string // login from basic auth
 	ChainID   int64  // chainID from path
 	ChainName string // chain name from config
@@ -83,6 +85,14 @@ func SetJSONRPCResponseToCtx(ctx *fasthttp.RequestCtx, response []JSONRPCRespons
 func SetJSONRPCRequestToCtx(ctx *fasthttp.RequestCtx, request []JSONRPCRequest) {
 	SetToReqCtx(ctx, func(rc *ReqCtx) {
 		rc.Request = request
+	})
+}
+
+// SetConnURLToCtx sets the connection url of provider to ctx.
+// It choiced by balancer.
+func SetConnURLToCtx(ctx *fasthttp.RequestCtx, connURL string) {
+	SetToReqCtx(ctx, func(rc *ReqCtx) {
+		rc.ConnURL = connURL
 	})
 }
 

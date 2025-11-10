@@ -53,10 +53,10 @@ type Logger struct {
 }
 
 type RPC struct {
-	Name      string     `yaml:"name"`
-	ChainID   int64      `yaml:"chain_id"`
-	Algo      string     `yaml:"algo"`
-	Providers []Provider `yaml:"providers"`
+	Name         string     `yaml:"name"`
+	ChainID      int64      `yaml:"chain_id"`
+	BalancerType string     `yaml:"balancer_type"`
+	Providers    []Provider `yaml:"providers"`
 }
 
 type Provider struct {
@@ -116,6 +116,7 @@ func getPort(port string) string {
 	return port
 }
 
+//nolint:cyclop // validation of config
 func validateConfig(cfg Config) error {
 	switch cfg.Logger.Format {
 	case "", "json", "inline":
@@ -131,6 +132,19 @@ func validateConfig(cfg Config) error {
 	case "", "basic", "query":
 	default:
 		return errors.New("Clients.Type incorrect, should be on of 'basic', 'query' or empty")
+	}
+
+	for i, rpc := range cfg.RPCs {
+		switch rpc.BalancerType {
+		case "":
+			cfg.RPCs[i].BalancerType = "p2cewma"
+		case "round-robin", "p2cewma":
+		default:
+			return fmt.Errorf(
+				"RPC[%s].BalancerType incorrect, should be on of 'round-robin', 'p2cewma' or empty",
+				rpc.Name,
+			)
+		}
 	}
 
 	return nil

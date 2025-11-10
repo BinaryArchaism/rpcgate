@@ -22,14 +22,15 @@ import (
 )
 
 type Server struct {
-	srv        *fasthttp.Server
-	cli        *fasthttp.Client
-	port       string
-	rr         map[string]*balancer.RoundRobin
-	rpcs       []config.RPC
-	clients    config.Clients
-	metricsCfg config.Metrics
-	done       chan struct{}
+	srv            *fasthttp.Server
+	cli            *fasthttp.Client
+	port           string
+	rpcs           []config.RPC
+	clients        config.Clients
+	metricsCfg     config.Metrics
+	chainToP2CEWMA map[string]*balancer.P2CEWMA
+	chainToRR      map[string]*balancer.RoundRobin
+	done           chan struct{}
 }
 
 func New(cfg config.Config) *Server {
@@ -40,7 +41,8 @@ func New(cfg config.Config) *Server {
 	srv.rpcs = cfg.RPCs
 	srv.port = cfg.Port
 	srv.done = make(chan struct{})
-	srv.rr = make(map[string]*balancer.RoundRobin)
+	srv.chainToP2CEWMA = make(map[string]*balancer.P2CEWMA)
+	srv.chainToRR = map[string]*balancer.RoundRobin{}
 	srv.clients = cfg.Clients
 	srv.metricsCfg = cfg.Metrics
 
@@ -50,8 +52,25 @@ func New(cfg config.Config) *Server {
 				srv.metricsMiddleware(
 					srv.authMiddleware(
 						srv.routerHandler(
-							srv.requestResponseParserMiddleware(
-								srv.handler)))))))
+							srv.loadBalancerMiddleware(
+								srv.requestResponseParserMiddleware(
+									srv.handler))))))))
+
+	for _, rpc := range cfg.RPCs {
+		payload := make([]balancer.Payload, 0, len(rpc.Providers))
+		for _, provider := range rpc.Providers {
+			payload = append(payload, balancer.Payload{
+				URL:  provider.ConnURL,
+				Name: provider.Name,
+			})
+		}
+		switch rpc.BalancerType {
+		case "p2cewma":
+			srv.chainToP2CEWMA[fmt.Sprintf("/%d", rpc.ChainID)] = balancer.NewP2CEWMADefault(payload)
+		case "round-robin":
+			srv.chainToRR[fmt.Sprintf("/%d", rpc.ChainID)] = balancer.NewRoundRobin(payload)
+		}
+	}
 
 	srv.srv = &fasthttp.Server{
 		Handler: handler,
@@ -79,16 +98,12 @@ func (srv *Server) Stop() {
 }
 
 func (srv *Server) handler(ctx *fasthttp.RequestCtx) {
-	provider := srv.rr[string(ctx.Path())].Next()
-
-	log.Debug().Uint64("request_id", ctx.ID()).Str("name", provider.Name).Msg("request goes to")
-
-	SetProviderToReqCtx(ctx, provider.Name)
+	reqctx := GetReqCtx(ctx)
 
 	req := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req)
 
-	req.SetRequestURI(provider.ConnURL)
+	req.SetRequestURI(reqctx.ConnURL)
 	req.SetBody(ctx.Request.Body())
 	req.Header.SetMethod(fasthttp.MethodPost)
 	req.Header.SetContentType("application/json")
@@ -142,6 +157,7 @@ func (srv *Server) loggingMiddleware(f fasthttp.RequestHandler) fasthttp.Request
 			Str("latency", time.Since(start).String()).
 			Str("path", string(ctx.Path())).
 			Str("client", reqctx.Client).
+			Str("provider", reqctx.Provider).
 			Msg("request completed")
 	}
 }
@@ -209,9 +225,6 @@ func (srv *Server) routerHandler(f fasthttp.RequestHandler) fasthttp.RequestHand
 		chains[key] = rpc.ChainID
 		chainIDToName[rpc.ChainID] = rpc.Name
 		chainToConnUrls[key] = append(chainToConnUrls[key], rpc.Providers...)
-	}
-	for chain, urls := range chainToConnUrls {
-		srv.rr[chain] = balancer.NewRoundRobin(urls)
 	}
 
 	return func(ctx *fasthttp.RequestCtx) {
@@ -370,4 +383,82 @@ func isBodyArray(body []byte) (bool, error) {
 	}
 
 	return false, errors.New("body is invalid")
+}
+
+func (srv *Server) loadBalancerMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHandler {
+	const base = 10
+	chainToLBAlgo := make(map[string]string)
+	for _, rpc := range srv.rpcs {
+		key := "/" + strconv.FormatInt(rpc.ChainID, base)
+		chainToLBAlgo[key] = rpc.BalancerType
+	}
+
+	return func(ctx *fasthttp.RequestCtx) {
+		switch chainToLBAlgo[string(ctx.Path())] {
+		case "p2cewma":
+			srv.proccessP2CEWMA(ctx, f)
+		case "round-robin":
+			srv.proccessRoundRobin(ctx, f)
+		}
+	}
+}
+
+func (srv *Server) proccessP2CEWMA(ctx *fasthttp.RequestCtx, next fasthttp.RequestHandler) {
+	lb := srv.chainToP2CEWMA[string(ctx.Path())]
+	provider, release := lb.Borrow()
+	SetProviderToReqCtx(ctx, provider.Name)
+	SetConnURLToCtx(ctx, provider.URL)
+
+	start := time.Now()
+
+	next(ctx)
+
+	ok := ctx.Response.StatusCode() == fasthttp.StatusOK
+	reqctx := GetReqCtx(ctx)
+
+	if len(reqctx.Response) == 0 {
+		ok = false
+	}
+	for _, resp := range reqctx.Response {
+		if !resp.HasError() {
+			continue
+		}
+		if !isUserCallError(resp.Error.Code, resp.Error.Message) {
+			ok = false
+			break
+		}
+	}
+
+	release(ok, time.Since(start))
+}
+
+func (srv *Server) proccessRoundRobin(ctx *fasthttp.RequestCtx, next fasthttp.RequestHandler) {
+	lb := srv.chainToRR[string(ctx.Path())]
+	provider := lb.Next()
+	SetProviderToReqCtx(ctx, provider.Name)
+	SetConnURLToCtx(ctx, provider.URL)
+	next(ctx)
+}
+
+func isUserCallError(code int64, msg string) bool {
+	switch code {
+	case -32003, -32004, -32006, -32010, -32600, -32700:
+		return true
+	case -32601:
+		// TODO required methods validation
+		return true
+	case -32602:
+		m := strings.ToLower(msg)
+		if strings.Contains(m, "block range limit exceeded") {
+			return false
+		}
+		return true
+	case -32000:
+		m := strings.ToLower(msg)
+		if strings.Contains(m, "execution reverted") ||
+			strings.Contains(m, "replacement transaction underpriced") {
+			return true
+		}
+	}
+	return false
 }
