@@ -13,6 +13,7 @@ type ReqCtx struct {
 
 	ConnURL string // provider connection url choiced by balanacer
 
+	Balancer  string // load balancing algorithm for request
 	Client    string // login from basic auth
 	ChainID   int64  // chainID from path
 	ChainName string // chain name from config
@@ -93,6 +94,14 @@ func SetJSONRPCRequestToCtx(ctx *fasthttp.RequestCtx, request []JSONRPCRequest) 
 func SetConnURLToCtx(ctx *fasthttp.RequestCtx, connURL string) {
 	SetToReqCtx(ctx, func(rc *ReqCtx) {
 		rc.ConnURL = connURL
+	})
+}
+
+// SetBalancerToCtx sets the balancer algorithm to ctx.
+// It choiced by balancer.
+func SetBalancerToCtx(ctx *fasthttp.RequestCtx, balancer string) {
+	SetToReqCtx(ctx, func(rc *ReqCtx) {
+		rc.Balancer = balancer
 	})
 }
 

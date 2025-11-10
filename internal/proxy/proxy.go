@@ -203,34 +203,64 @@ func (srv *Server) metricsMiddleware(f fasthttp.RequestHandler) fasthttp.Request
 
 		if len(reqctx.Request) == 1 {
 			metrics.RequestLatencySeconds.WithLabelValues(
-				chainID, reqctx.ChainName, reqctx.Provider, reqctx.Request[0].Method, reqctx.Client).
+				chainID, reqctx.ChainName, reqctx.Provider, reqctx.Balancer, reqctx.Request[0].Method, reqctx.Client).
 				Observe(latency)
 			metrics.RequestTotalCounter.WithLabelValues(
-				chainID, reqctx.ChainName, reqctx.Provider, reqctx.Request[0].Method, reqctx.Client).Inc()
+				chainID,
+				reqctx.ChainName,
+				reqctx.Provider,
+				reqctx.Balancer,
+				reqctx.Request[0].Method,
+				reqctx.Client,
+			).Inc()
 			if reqctx.Response[0].HasError() {
 				metrics.ClientRequestError.WithLabelValues(
-					chainID, reqctx.ChainName, reqctx.Provider, reqctx.Request[0].Method, reqctx.Client).Inc()
+					chainID,
+					reqctx.ChainName,
+					reqctx.Provider,
+					reqctx.Balancer,
+					reqctx.Request[0].Method,
+					reqctx.Client,
+				).Inc()
 			}
 			if ctx.Response.StatusCode() != fasthttp.StatusOK {
 				metrics.RequestError.WithLabelValues(
-					chainID, reqctx.ChainName, reqctx.Provider, reqctx.Request[0].Method, reqctx.Client).Inc()
+					chainID,
+					reqctx.ChainName,
+					reqctx.Provider,
+					reqctx.Balancer,
+					reqctx.Request[0].Method,
+					reqctx.Client,
+				).Inc()
 			}
 			return
 		}
 
 		metrics.RequestLatencySeconds.WithLabelValues(
-			chainID, reqctx.ChainName, reqctx.Provider, "batch", reqctx.Client).
+			chainID, reqctx.ChainName, reqctx.Provider, reqctx.Balancer, "batch", reqctx.Client).
 			Observe(latency)
 		if ctx.Response.StatusCode() != fasthttp.StatusOK {
 			metrics.RequestError.WithLabelValues(
-				chainID, reqctx.ChainName, reqctx.Provider, "batch", reqctx.Client).Inc()
+				chainID, reqctx.ChainName, reqctx.Balancer, reqctx.Provider, "batch", reqctx.Client).Inc()
 		}
 		for i := range len(reqctx.Request) {
 			metrics.RequestTotalCounter.WithLabelValues(
-				chainID, reqctx.ChainName, reqctx.Provider, reqctx.Request[i].Method, reqctx.Client).Inc()
+				chainID,
+				reqctx.ChainName,
+				reqctx.Provider,
+				reqctx.Balancer,
+				reqctx.Request[i].Method,
+				reqctx.Client,
+			).Inc()
 			if reqctx.Response[i].HasError() {
 				metrics.ClientRequestError.WithLabelValues(
-					chainID, reqctx.ChainName, reqctx.Provider, reqctx.Request[i].Method, reqctx.Client).Inc()
+					chainID,
+					reqctx.ChainName,
+					reqctx.Provider,
+					reqctx.Balancer,
+					reqctx.Request[i].Method,
+					reqctx.Client,
+				).Inc()
 			}
 		}
 	}
@@ -418,8 +448,10 @@ func (srv *Server) loadBalancerMiddleware(f fasthttp.RequestHandler) fasthttp.Re
 	return func(ctx *fasthttp.RequestCtx) {
 		switch chainToLBAlgo[string(ctx.Path())] {
 		case "p2cewma":
+			SetBalancerToCtx(ctx, "p2cewma")
 			srv.proccessP2CEWMA(ctx, f)
 		case "round-robin":
+			SetBalancerToCtx(ctx, "round-robin")
 			srv.proccessRoundRobin(ctx, f)
 		}
 	}

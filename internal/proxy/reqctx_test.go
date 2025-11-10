@@ -104,4 +104,12 @@ func Test_ReqCtx(t *testing.T) {
 		require.NotEmpty(t, *gotReqCtx)
 		require.Equal(t, connURL, gotReqCtx.ConnURL)
 	})
+	t.Run("SetBalancerToCtx", func(t *testing.T) {
+		req := &fasthttp.RequestCtx{}
+		balancer := "test"
+		proxy.SetBalancerToCtx(req, balancer)
+		gotReqCtx := proxy.GetReqCtx(req)
+		require.NotEmpty(t, *gotReqCtx)
+		require.Equal(t, balancer, gotReqCtx.Balancer)
+	})
 }
