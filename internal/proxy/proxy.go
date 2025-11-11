@@ -234,6 +234,14 @@ func (srv *Server) metricsMiddleware(f fasthttp.RequestHandler) fasthttp.Request
 					reqctx.Client,
 				).Inc()
 			}
+			metrics.ResponseSizeBytes.WithLabelValues(
+				chainID,
+				reqctx.RPCName,
+				reqctx.Provider,
+				reqctx.Balancer,
+				reqctx.Request[0].Method,
+				reqctx.Client,
+			).Observe(float64(len(ctx.Response.Body())))
 			return
 		}
 
@@ -244,6 +252,14 @@ func (srv *Server) metricsMiddleware(f fasthttp.RequestHandler) fasthttp.Request
 			metrics.RequestError.WithLabelValues(
 				chainID, reqctx.RPCName, reqctx.Balancer, reqctx.Provider, "batch", reqctx.Client).Inc()
 		}
+		metrics.ResponseSizeBytes.WithLabelValues(
+			chainID,
+			reqctx.RPCName,
+			reqctx.Provider,
+			reqctx.Balancer,
+			"batch",
+			reqctx.Client,
+		).Observe(float64(len(ctx.Response.Body())))
 		for i := range len(reqctx.Request) {
 			metrics.RequestTotalCounter.WithLabelValues(
 				chainID,
