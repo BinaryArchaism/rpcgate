@@ -46,6 +46,11 @@ var (
 		Name:      "client_request_error_total",
 		Help:      "Client request error total",
 	}, []string{"chain_id", "rpc_name", "provider", "balancer", "method", "client"})
+	ResponseSizeBytes = prometheus.NewSummaryVec(prometheus.SummaryOpts{
+		Namespace: namespace,
+		Name:      "response_size_bytes",
+		Help:      "Response size bytes gauge",
+	}, []string{"chain_id", "rpc_name", "provider", "balancer", "method", "client"})
 )
 
 type Server struct {
@@ -61,6 +66,7 @@ func New(cfg config.Config) *Server {
 		RequestTotalCounter,
 		RequestError,
 		ClientRequestError,
+		ResponseSizeBytes,
 	)
 	m := http.NewServeMux()
 	path := defaultPath
