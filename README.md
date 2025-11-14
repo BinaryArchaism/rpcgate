@@ -10,13 +10,13 @@ It increases reliability, provides unified access across chains, and exposes met
 
 ---
 
-### ✨ Features
+### Features
 - **Multi-chain configuration** — define gateways for several networks in a single file.  
 - **Multi-provider setup** — balance requests across public RPCs or private nodes for high availability.  
 - **Metrics** — observe provider latency, error rates and usage.  
 - **Client tracking** — per-application statistics.  
 
-### 🚀 Quick start
+### Quick start
 
 1. Clone repo.
     ```
@@ -100,7 +100,7 @@ so you can track metrics per application without changing any code.
 
     If you don’t need a password, omit it.
     
-    > 📝 **Note:** Some SDKs (like Web3.py) require a colon `:` after username even if no password is set.
+    > **Note:** Some SDKs (like Web3.py) require a colon `:` after username even if no password is set.
 
 - **Query parameter**
     ```yaml
@@ -109,6 +109,14 @@ so you can track metrics per application without changing any code.
     ```
     Connection string example: 
     - https://rpcgate-url/1?client=admin
+
+### Grafana Dashboard 
+
+An official Grafana dashboard is available for RPCGate:
+
+[Dashboard](https://grafana.com/grafana/dashboards/24382-rpcgate/)
+
+The dashboard visualizes key rpcgate metrics — RPS, latency (p50/p95/p99), error rates, load distribution across providers, and response sizes.
 
 ### 🪪 License
 
