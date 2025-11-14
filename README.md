@@ -112,9 +112,7 @@ so you can track metrics per application without changing any code.
 
 ### Grafana Dashboard 
 
-An official Grafana dashboard is available for RPCGate:
-
-[Dashboard](https://grafana.com/grafana/dashboards/24382-rpcgate/)
+[An official Grafana dashboard](https://grafana.com/grafana/dashboards/24382-rpcgate/) is available for rpcgate.
 
 The dashboard visualizes key rpcgate metrics — RPS, latency (p50/p95/p99), error rates, load distribution across providers, and response sizes.
 
