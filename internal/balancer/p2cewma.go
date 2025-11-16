@@ -31,6 +31,9 @@ func NewP2CEWMADefault(providers []Payload) *P2CEWMA {
 }
 
 // NewP2CEWMA constructs a P2CEWMA with passed parameters.
+//
+// The passed slice of Payload is copied, so it is safe to modify
+// the original slice after calling this function.
 func NewP2CEWMA(
 	providers []Payload,
 	smooth, loadNormalizer, penaltyDecay float64,
@@ -54,7 +57,7 @@ func NewP2CEWMA(
 // Borrow picks a provider and returns its Payload plus a release callback.
 // You MUST call release(ok, latency) after the upstream request completes,
 // where ok indicates provider-level success and latency is the end-to-end duration.
-func (b *P2CEWMA) Borrow() (Payload, func(bool, time.Duration)) {
+func (b *P2CEWMA) Borrow() (Payload, Release) {
 	provider := b.p2c()
 
 	if provider == nil {

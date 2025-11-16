@@ -2,6 +2,7 @@ package balancer
 
 import (
 	"sync"
+	"time"
 )
 
 // RoundRobin implements a simple round-robin load-balancing algorithm
@@ -13,7 +14,9 @@ type RoundRobin struct {
 }
 
 // NewRoundRobin returns a new RoundRobin instance.
-// The provided slice is copied so it can be safely modified later.
+//
+// The passed slice of Payload is copied, so it is safe to modify
+// the original slice after calling this function.
 func NewRoundRobin(urls []Payload) *RoundRobin {
 	payload := make([]Payload, 0, len(urls))
 	for _, url := range urls {
@@ -27,9 +30,9 @@ func NewRoundRobin(urls []Payload) *RoundRobin {
 	}
 }
 
-// Next returns the next Payload in sequence and advances the index.
+// Borrow returns the next Payload in sequence and advances the index.
 // The sequence wraps around to the beginning once it reaches the end.
-func (rr *RoundRobin) Next() Payload {
+func (rr *RoundRobin) Borrow() (Payload, Release) {
 	rr.mutex.Lock()
 	defer rr.mutex.Unlock()
 
@@ -39,5 +42,5 @@ func (rr *RoundRobin) Next() Payload {
 		rr.currentIX = 0
 	}
 
-	return payload
+	return payload, func(bool, time.Duration) {}
 }
