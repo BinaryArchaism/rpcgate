@@ -154,10 +154,10 @@ func validateConfig(cfg Config) error {
 		switch rpc.BalancerType {
 		case "":
 			cfg.RPCs[i].BalancerType = "p2cewma"
-		case "round-robin", "p2cewma":
+		case "round-robin", "p2cewma", "least-connection":
 		default:
 			return fmt.Errorf(
-				"RPC[%s].BalancerType incorrect, should be on of 'round-robin', 'p2cewma' or empty",
+				"RPC[%s].BalancerType incorrect, should be on of 'round-robin', 'p2cewma', 'least-connection' or empty",
 				rpc.Name,
 			)
 		}

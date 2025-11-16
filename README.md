@@ -38,6 +38,8 @@ It increases reliability, provides unified access across chains, and exposes met
   Adaptive algorithm based on Exponentially Weighted Moving Average (EWMA) latency, in-flight load, and penalties for providers errors.
 - **round-robin**
   Simple rotation of requests across providers.
+- **least-connection**
+  Distributes requests based on the number of active in-flight calls per provider. It always prefers providers that are currently less loaded.
 
 > **p2cewma** is a default option.
 > The p2cewma algorithm automatically adapts to provider latency and reliability, giving higher throughput under variable RPC conditions.
@@ -46,7 +48,7 @@ To configure a balancing strategy, specify it per-chain in your config:
 ```yaml 
 rpcs:
   - name: mainnet
-    balancer_type: p2cewma # [p2cewma, round-robin]
+    balancer_type: p2cewma # [p2cewma, round-robin, least-connection]
   - name: base
     # omit balancer_type to use default (p2cewma)
 ```

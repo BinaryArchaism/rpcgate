@@ -30,6 +30,7 @@ type Server struct {
 	metricsCfg     config.Metrics
 	chainToP2CEWMA map[string]*balancer.P2CEWMA
 	chainToRR      map[string]*balancer.RoundRobin
+	chainToLC      map[string]*balancer.LeastConnection
 	done           chan struct{}
 }
 
@@ -43,6 +44,7 @@ func New(cfg config.Config) *Server {
 	srv.done = make(chan struct{})
 	srv.chainToP2CEWMA = make(map[string]*balancer.P2CEWMA)
 	srv.chainToRR = map[string]*balancer.RoundRobin{}
+	srv.chainToLC = map[string]*balancer.LeastConnection{}
 	srv.clients = cfg.Clients
 	srv.metricsCfg = cfg.Metrics
 
@@ -54,13 +56,14 @@ func New(cfg config.Config) *Server {
 						srv.routerHandler(
 							srv.loadBalancerMiddleware(
 								srv.requestResponseParserMiddleware(
-									srv.handler))))))))
+									srv.handler)),
+						))))))
 
 	p2cewmaGlobalInited := cfg.P2CEWMA != config.P2CEWMAConfig{}
 	for _, rpc := range cfg.RPCs {
-		payload := make([]balancer.Payload, 0, len(rpc.Providers))
+		providers := make([]balancer.Payload, 0, len(rpc.Providers))
 		for _, provider := range rpc.Providers {
-			payload = append(payload, balancer.Payload{
+			providers = append(providers, balancer.Payload{
 				URL:  provider.ConnURL,
 				Name: provider.Name,
 			})
@@ -71,7 +74,7 @@ func New(cfg config.Config) *Server {
 			localInited := rpc.P2CEWMA != config.P2CEWMAConfig{}
 			if localInited {
 				srv.chainToP2CEWMA[key] = balancer.NewP2CEWMA(
-					payload,
+					providers,
 					rpc.P2CEWMA.Smooth,
 					rpc.P2CEWMA.LoadNormalizer,
 					rpc.P2CEWMA.PenaltyDecay,
@@ -81,7 +84,7 @@ func New(cfg config.Config) *Server {
 			}
 			if p2cewmaGlobalInited {
 				srv.chainToP2CEWMA[key] = balancer.NewP2CEWMA(
-					payload,
+					providers,
 					cfg.P2CEWMA.Smooth,
 					cfg.P2CEWMA.LoadNormalizer,
 					cfg.P2CEWMA.PenaltyDecay,
@@ -89,9 +92,11 @@ func New(cfg config.Config) *Server {
 				)
 				continue
 			}
-			srv.chainToP2CEWMA[key] = balancer.NewP2CEWMADefault(payload)
+			srv.chainToP2CEWMA[key] = balancer.NewP2CEWMADefault(providers)
 		case "round-robin":
-			srv.chainToRR[key] = balancer.NewRoundRobin(payload)
+			srv.chainToRR[key] = balancer.NewRoundRobin(providers)
+		case "least-connection":
+			srv.chainToLC[key] = balancer.NewLeastConnection(providers)
 		}
 	}
 
@@ -283,7 +288,9 @@ func (srv *Server) metricsMiddleware(f fasthttp.RequestHandler) fasthttp.Request
 	}
 }
 
-func (srv *Server) routerHandler(f fasthttp.RequestHandler) fasthttp.RequestHandler {
+func (srv *Server) routerHandler(
+	httpFunc fasthttp.RequestHandler,
+) fasthttp.RequestHandler {
 	nameToChainID := make(map[string]int64)
 	for _, rpc := range srv.rpcs {
 		nameToChainID["/"+rpc.Name] = rpc.ChainID
@@ -298,7 +305,8 @@ func (srv *Server) routerHandler(f fasthttp.RequestHandler) fasthttp.RequestHand
 		}
 		SetChainIDToReqCtx(ctx, chainID)
 		SetRPCNameToReqCtx(ctx, strings.TrimPrefix(string(ctx.Path()), "/"))
-		f(ctx)
+
+		httpFunc(ctx)
 	}
 }
 
@@ -406,8 +414,9 @@ func (srv *Server) requestResponseParserMiddleware(f fasthttp.RequestHandler) fa
 			err = json.Unmarshal(ctx.Request.Body(), &singleReq)
 			if err != nil {
 				log.Error().Uint64("request_id", ctx.ID()).Err(err).Msg("can not parse request")
+			} else {
+				request = append(request, singleReq)
 			}
-			request = append(request, singleReq)
 		}
 		SetJSONRPCRequestToCtx(ctx, request)
 
@@ -424,8 +433,9 @@ func (srv *Server) requestResponseParserMiddleware(f fasthttp.RequestHandler) fa
 			err = json.Unmarshal(ctx.Response.Body(), &singleResp)
 			if err != nil {
 				log.Error().Uint64("request_id", ctx.ID()).Err(err).Msg("can not parse response")
+			} else {
+				response = append(response, singleResp)
 			}
-			response = append(response, singleResp)
 		}
 		SetJSONRPCResponseToCtx(ctx, response)
 	}
@@ -461,6 +471,9 @@ func (srv *Server) loadBalancerMiddleware(f fasthttp.RequestHandler) fasthttp.Re
 		case "round-robin":
 			SetBalancerToCtx(ctx, "round-robin")
 			srv.proccessRoundRobin(ctx, f)
+		case "least-connection":
+			SetBalancerToCtx(ctx, "least-connection")
+			srv.proccessLeastConnection(ctx, f)
 		}
 	}
 }
@@ -494,9 +507,19 @@ func (srv *Server) proccessP2CEWMA(ctx *fasthttp.RequestCtx, next fasthttp.Reque
 	release(ok, time.Since(start))
 }
 
+func (srv *Server) proccessLeastConnection(ctx *fasthttp.RequestCtx, next fasthttp.RequestHandler) {
+	lb := srv.chainToLC[string(ctx.Path())]
+	provider, release := lb.Borrow()
+	defer release(true, 0)
+
+	SetProviderToReqCtx(ctx, provider.Name)
+	SetConnURLToCtx(ctx, provider.URL)
+	next(ctx)
+}
+
 func (srv *Server) proccessRoundRobin(ctx *fasthttp.RequestCtx, next fasthttp.RequestHandler) {
 	lb := srv.chainToRR[string(ctx.Path())]
-	provider := lb.Next()
+	provider, _ := lb.Borrow()
 	SetProviderToReqCtx(ctx, provider.Name)
 	SetConnURLToCtx(ctx, provider.URL)
 	next(ctx)

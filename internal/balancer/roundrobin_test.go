@@ -21,8 +21,12 @@ func Test_RoundRobin(t *testing.T) {
 	rr := NewRoundRobin(payload)
 	require.NotNil(t, rr)
 
-	require.Equal(t, payload[0], rr.Next())
-	require.Equal(t, payload[1], rr.Next())
-	require.Equal(t, payload[2], rr.Next())
-	require.Equal(t, payload[0], rr.Next())
+	gotPayload, _ := rr.Borrow()
+	require.Equal(t, payload[0], gotPayload)
+	gotPayload, _ = rr.Borrow()
+	require.Equal(t, payload[1], gotPayload)
+	gotPayload, _ = rr.Borrow()
+	require.Equal(t, payload[2], gotPayload)
+	gotPayload, _ = rr.Borrow()
+	require.Equal(t, payload[0], gotPayload)
 }
