@@ -35,47 +35,6 @@ func Test_ReqCtx(t *testing.T) {
 		gotReqCtx := proxy.GetReqCtx(req)
 		require.Empty(t, *gotReqCtx)
 	})
-	t.Run("SetProviderToReqCtx", func(t *testing.T) {
-		req := &fasthttp.RequestCtx{}
-		proxy.SetProviderToReqCtx(req, "test")
-		gotReqCtx := proxy.GetReqCtx(req)
-		require.NotEmpty(t, *gotReqCtx)
-		require.Equal(t, "test", gotReqCtx.Provider)
-	})
-	t.Run("SetChainIDToReqCtx", func(t *testing.T) {
-		req := &fasthttp.RequestCtx{}
-		proxy.SetChainIDToReqCtx(req, 123)
-		gotReqCtx := proxy.GetReqCtx(req)
-		require.NotEmpty(t, *gotReqCtx)
-		require.Equal(t, int64(123), gotReqCtx.ChainID)
-	})
-	t.Run("SetRPCNameToReqCtx", func(t *testing.T) {
-		req := &fasthttp.RequestCtx{}
-		proxy.SetRPCNameToReqCtx(req, "test")
-		gotReqCtx := proxy.GetReqCtx(req)
-		require.NotEmpty(t, *gotReqCtx)
-		require.Equal(t, "test", gotReqCtx.RPCName)
-	})
-	t.Run("SetClientToReqCtx", func(t *testing.T) {
-		req := &fasthttp.RequestCtx{}
-		proxy.SetClientToReqCtx(req, "test")
-		gotReqCtx := proxy.GetReqCtx(req)
-		require.NotEmpty(t, *gotReqCtx)
-		require.Equal(t, "test", gotReqCtx.Client)
-	})
-	t.Run("SetJSONRPCResponseToCtx", func(t *testing.T) {
-		req := &fasthttp.RequestCtx{}
-		resp := []proxy.JSONRPCResponse{
-			{Error: proxy.JSONRPCError{
-				Code:    123,
-				Message: "error",
-			}},
-		}
-		proxy.SetJSONRPCResponseToCtx(req, resp)
-		gotReqCtx := proxy.GetReqCtx(req)
-		require.NotEmpty(t, *gotReqCtx)
-		require.Equal(t, resp, gotReqCtx.Response)
-	})
 	t.Run("HasError", func(t *testing.T) {
 		var resp proxy.JSONRPCResponse
 		require.False(t, resp.HasError())
@@ -86,30 +45,13 @@ func Test_ReqCtx(t *testing.T) {
 		}
 		require.True(t, resp.HasError())
 	})
-	t.Run("SetJSONRPCRequestToCtx", func(t *testing.T) {
+	t.Run("setter", func(t *testing.T) {
 		req := &fasthttp.RequestCtx{}
-		jsonrpcreq := []proxy.JSONRPCRequest{
-			{Method: "test"},
-		}
-		proxy.SetJSONRPCRequestToCtx(req, jsonrpcreq)
+		proxy.SetToReqCtx(req, func(rc *proxy.ReqCtx) {
+			rc.Balancer = "test"
+		})
 		gotReqCtx := proxy.GetReqCtx(req)
 		require.NotEmpty(t, *gotReqCtx)
-		require.Equal(t, jsonrpcreq, gotReqCtx.Request)
-	})
-	t.Run("SetConnURLToCtx", func(t *testing.T) {
-		req := &fasthttp.RequestCtx{}
-		connURL := "test"
-		proxy.SetConnURLToCtx(req, connURL)
-		gotReqCtx := proxy.GetReqCtx(req)
-		require.NotEmpty(t, *gotReqCtx)
-		require.Equal(t, connURL, gotReqCtx.ConnURL)
-	})
-	t.Run("SetBalancerToCtx", func(t *testing.T) {
-		req := &fasthttp.RequestCtx{}
-		balancer := "test"
-		proxy.SetBalancerToCtx(req, balancer)
-		gotReqCtx := proxy.GetReqCtx(req)
-		require.NotEmpty(t, *gotReqCtx)
-		require.Equal(t, balancer, gotReqCtx.Balancer)
+		require.Equal(t, "test", gotReqCtx.Balancer)
 	})
 }

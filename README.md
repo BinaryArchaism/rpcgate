@@ -33,6 +33,19 @@ It increases reliability, provides unified access across chains, and exposes met
     docker run -p port:8080 -v your-config-path:/config.yaml [-d] rpcgate
     ```
 
+#### Config placeholders
+rpcgate supports environment variable placeholders in the config. Use the `${VAR_NAME}` format — rpcgate will substitute the value from the environment and **panic on missing variables**.
+```yaml
+rpcs:
+  - name: mainnet
+    chain_id: 1
+    balancer_type: round-robin
+    providers:
+      - name: ankr
+        conn_url: https://rpc.ankr.com/eth/${ANKR_MAINNET_TOKEN}
+```
+Placeholders can be used anywhere in the YAML file.
+
 #### Load balancing options
 - **p2cewma**
   Adaptive algorithm based on Exponentially Weighted Moving Average (EWMA) latency, in-flight load, and penalties for providers errors.

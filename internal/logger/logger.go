@@ -11,6 +11,7 @@ import (
 	"github.com/BinaryArchaism/rpcgate/internal/config"
 )
 
+// SetupLogger initialize zerolog.Logger, enables config based writer and log level.
 func SetupLogger(cfg config.Config) {
 	zerolog.SetGlobalLevel(cfg.Logger.Level)
 	writer := getLogWriter(cfg)
@@ -23,6 +24,7 @@ func SetupLogger(cfg config.Config) {
 	zerolog.DefaultContextLogger = &log.Logger           //nolint:reassign // logger setup
 }
 
+// getLogWriter returns io.Writer that was required by config.
 func getLogWriter(cfg config.Config) io.Writer {
 	if cfg.Logger.Writer == "none" {
 		return io.Discard

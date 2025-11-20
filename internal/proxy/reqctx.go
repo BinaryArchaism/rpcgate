@@ -18,6 +18,9 @@ type ReqCtx struct {
 	ChainID  int64  // chainID from path
 	RPCName  string // rpc name from config
 	Provider string // provider from config
+
+	Latency       float64 // request latency
+	IsClientError bool    // true if response contains user user
 }
 
 // SetToCtx stores the ReqCtx in the given fasthttp.RequestCtx.
@@ -43,66 +46,6 @@ func GetReqCtx(ctx *fasthttp.RequestCtx) *ReqCtx {
 	}
 
 	return reqctx
-}
-
-// SetProviderToReqCtx sets the provider field in the given fasthttp.RequestCtx.
-func SetProviderToReqCtx(ctx *fasthttp.RequestCtx, provider string) {
-	SetToReqCtx(ctx, func(rc *ReqCtx) {
-		rc.Provider = provider
-	})
-}
-
-// SetChainIDToReqCtx sets the chain ID field in the given fasthttp.RequestCtx.
-func SetChainIDToReqCtx(ctx *fasthttp.RequestCtx, chainID int64) {
-	SetToReqCtx(ctx, func(rc *ReqCtx) {
-		rc.ChainID = chainID
-	})
-}
-
-// SetRPCNameToReqCtx sets the rpc name field in the given fasthttp.RequestCtx.
-func SetRPCNameToReqCtx(ctx *fasthttp.RequestCtx, rpcName string) {
-	SetToReqCtx(ctx, func(rc *ReqCtx) {
-		rc.RPCName = rpcName
-	})
-}
-
-// SetClientToReqCtx sets the client field in the given fasthttp.RequestCtx.
-func SetClientToReqCtx(ctx *fasthttp.RequestCtx, client string) {
-	SetToReqCtx(ctx, func(rc *ReqCtx) {
-		rc.Client = client
-	})
-}
-
-// SetJSONRPCResponseToCtx sets the json-rpc response from node to
-// Response field in the given fasthttp.RequestCtx.
-func SetJSONRPCResponseToCtx(ctx *fasthttp.RequestCtx, response []JSONRPCResponse) {
-	SetToReqCtx(ctx, func(rc *ReqCtx) {
-		rc.Response = response
-	})
-}
-
-// SetJSONRPCRequestToCtx sets the json-rpc request from client to
-// Request field in the given fasthttp.RequestCtx.
-func SetJSONRPCRequestToCtx(ctx *fasthttp.RequestCtx, request []JSONRPCRequest) {
-	SetToReqCtx(ctx, func(rc *ReqCtx) {
-		rc.Request = request
-	})
-}
-
-// SetConnURLToCtx sets the connection url of provider to ctx.
-// It choiced by balancer.
-func SetConnURLToCtx(ctx *fasthttp.RequestCtx, connURL string) {
-	SetToReqCtx(ctx, func(rc *ReqCtx) {
-		rc.ConnURL = connURL
-	})
-}
-
-// SetBalancerToCtx sets the balancer algorithm to ctx.
-// It choiced by balancer.
-func SetBalancerToCtx(ctx *fasthttp.RequestCtx, balancer string) {
-	SetToReqCtx(ctx, func(rc *ReqCtx) {
-		rc.Balancer = balancer
-	})
 }
 
 // JSONRPCRequest json-rpc request spec struct with method field.
