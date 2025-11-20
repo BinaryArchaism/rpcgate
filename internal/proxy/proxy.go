@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -21,10 +20,14 @@ import (
 	"github.com/BinaryArchaism/rpcgate/internal/metrics"
 )
 
+type Balancer interface {
+	Borrow() (balancer.Payload, balancer.Release)
+}
+
 type Server struct {
 	srv            *fasthttp.Server
 	cli            *fasthttp.Client
-	port           string
+	port           int64
 	rpcs           []config.RPC
 	clients        config.Clients
 	metricsCfg     config.Metrics
@@ -35,18 +38,17 @@ type Server struct {
 }
 
 func New(cfg config.Config) *Server {
-	var srv Server
-
-	var cli fasthttp.Client
-	srv.cli = &cli
-	srv.rpcs = cfg.RPCs
-	srv.port = cfg.Port
-	srv.done = make(chan struct{})
-	srv.chainToP2CEWMA = make(map[string]*balancer.P2CEWMA)
-	srv.chainToRR = map[string]*balancer.RoundRobin{}
-	srv.chainToLC = map[string]*balancer.LeastConnection{}
-	srv.clients = cfg.Clients
-	srv.metricsCfg = cfg.Metrics
+	srv := Server{
+		cli:            &fasthttp.Client{},
+		rpcs:           cfg.RPCs,
+		port:           cfg.Port,
+		done:           make(chan struct{}),
+		chainToP2CEWMA: make(map[string]*balancer.P2CEWMA),
+		chainToRR:      make(map[string]*balancer.RoundRobin),
+		chainToLC:      make(map[string]*balancer.LeastConnection),
+		clients:        cfg.Clients,
+		metricsCfg:     cfg.Metrics,
+	}
 
 	handler := srv.recoverHandler(
 		srv.healthzProbeMiddleware(
@@ -59,7 +61,6 @@ func New(cfg config.Config) *Server {
 									srv.handler)),
 						))))))
 
-	p2cewmaGlobalInited := cfg.P2CEWMA != config.P2CEWMAConfig{}
 	for _, rpc := range cfg.RPCs {
 		providers := make([]balancer.Payload, 0, len(rpc.Providers))
 		for _, provider := range rpc.Providers {
@@ -71,28 +72,13 @@ func New(cfg config.Config) *Server {
 		key := "/" + rpc.Name
 		switch rpc.BalancerType {
 		case "p2cewma":
-			localInited := rpc.P2CEWMA != config.P2CEWMAConfig{}
-			if localInited {
-				srv.chainToP2CEWMA[key] = balancer.NewP2CEWMA(
-					providers,
-					rpc.P2CEWMA.Smooth,
-					rpc.P2CEWMA.LoadNormalizer,
-					rpc.P2CEWMA.PenaltyDecay,
-					rpc.P2CEWMA.CooldownTimeout,
-				)
-				continue
-			}
-			if p2cewmaGlobalInited {
-				srv.chainToP2CEWMA[key] = balancer.NewP2CEWMA(
-					providers,
-					cfg.P2CEWMA.Smooth,
-					cfg.P2CEWMA.LoadNormalizer,
-					cfg.P2CEWMA.PenaltyDecay,
-					cfg.P2CEWMA.CooldownTimeout,
-				)
-				continue
-			}
-			srv.chainToP2CEWMA[key] = balancer.NewP2CEWMADefault(providers)
+			srv.chainToP2CEWMA[key] = balancer.NewP2CEWMA(
+				providers,
+				rpc.P2CEWMA.Smooth,
+				rpc.P2CEWMA.LoadNormalizer,
+				rpc.P2CEWMA.PenaltyDecay,
+				rpc.P2CEWMA.CooldownTimeout,
+			)
 		case "round-robin":
 			srv.chainToRR[key] = balancer.NewRoundRobin(providers)
 		case "least-connection":
@@ -109,7 +95,7 @@ func New(cfg config.Config) *Server {
 
 func (srv *Server) Start(ctx context.Context) {
 	go func() {
-		err := srv.srv.ListenAndServe(srv.port)
+		err := srv.srv.ListenAndServe(fmt.Sprintf(":%d", srv.port))
 		if err != nil {
 			log.Ctx(ctx).Panic().Err(err).Msg("Proxy server failed to start")
 		}
@@ -158,11 +144,12 @@ func (srv *Server) recoverHandler(f fasthttp.RequestHandler) fasthttp.RequestHan
 	return func(ctx *fasthttp.RequestCtx) {
 		defer func() {
 			if r := recover(); r != nil {
-				stack := debug.Stack()
 				log.Error().
+					// TODO this doesnt print stack
+					Stack().
+					Err(errors.New("panic")).
 					Uint64("request_id", ctx.ID()).
-					Bytes("stack", stack).
-					Any("panic", r).
+					Any("recover", r).
 					Msg("panic at handler")
 				ctx.Error("internal server error", fasthttp.StatusInternalServerError)
 			}
@@ -200,90 +187,63 @@ func (srv *Server) metricsMiddleware(f fasthttp.RequestHandler) fasthttp.Request
 	}
 
 	return func(ctx *fasthttp.RequestCtx) {
-		start := time.Now()
 		f(ctx)
-		latency := time.Since(start).Seconds()
 
 		reqctx := GetReqCtx(ctx)
 		chainID := strconv.FormatInt(reqctx.ChainID, base)
 
-		if len(reqctx.Request) == 1 {
+		observeLatency := func(method string) {
 			metrics.RequestLatencySeconds.WithLabelValues(
-				chainID, reqctx.RPCName, reqctx.Provider, reqctx.Balancer, reqctx.Request[0].Method, reqctx.Client).
-				Observe(latency)
+				chainID, reqctx.RPCName, reqctx.Provider, reqctx.Balancer, method, reqctx.Client).
+				Observe(reqctx.Latency)
+		}
+		observeTotal := func(method string) {
 			metrics.RequestTotalCounter.WithLabelValues(
-				chainID,
-				reqctx.RPCName,
-				reqctx.Provider,
-				reqctx.Balancer,
-				reqctx.Request[0].Method,
-				reqctx.Client,
+				chainID, reqctx.RPCName, reqctx.Provider, reqctx.Balancer, method, reqctx.Client,
 			).Inc()
-			if reqctx.Response[0].HasError() {
+		}
+		observeClientError := func(hasErr bool, method string) {
+			if hasErr {
 				metrics.ClientRequestError.WithLabelValues(
-					chainID,
-					reqctx.RPCName,
-					reqctx.Provider,
-					reqctx.Balancer,
-					reqctx.Request[0].Method,
-					reqctx.Client,
+					chainID, reqctx.RPCName, reqctx.Provider, reqctx.Balancer, method, reqctx.Client,
 				).Inc()
 			}
+		}
+		observeRequestError := func(method string) {
 			if ctx.Response.StatusCode() != fasthttp.StatusOK {
 				metrics.RequestError.WithLabelValues(
-					chainID,
-					reqctx.RPCName,
-					reqctx.Provider,
-					reqctx.Balancer,
-					reqctx.Request[0].Method,
-					reqctx.Client,
+					chainID, reqctx.RPCName, reqctx.Provider, reqctx.Balancer, method, reqctx.Client,
 				).Inc()
 			}
+		}
+		observeResponseSizeBytes := func(method string) {
 			metrics.ResponseSizeBytes.WithLabelValues(
-				chainID,
-				reqctx.RPCName,
-				reqctx.Provider,
-				reqctx.Balancer,
-				reqctx.Request[0].Method,
-				reqctx.Client,
+				chainID, reqctx.RPCName, reqctx.Provider, reqctx.Balancer, method, reqctx.Client,
 			).Observe(float64(len(ctx.Response.Body())))
+		}
+
+		if len(reqctx.Request) == 1 && len(reqctx.Response) == 1 {
+			observeLatency(reqctx.Request[0].Method)
+			observeTotal(reqctx.Request[0].Method)
+			observeClientError(reqctx.Response[0].HasError(), reqctx.Request[0].Method)
+			observeRequestError(reqctx.Request[0].Method)
+			observeResponseSizeBytes(reqctx.Request[0].Method)
 			return
 		}
 
-		metrics.RequestLatencySeconds.WithLabelValues(
-			chainID, reqctx.RPCName, reqctx.Provider, reqctx.Balancer, "batch", reqctx.Client).
-			Observe(latency)
-		if ctx.Response.StatusCode() != fasthttp.StatusOK {
-			metrics.RequestError.WithLabelValues(
-				chainID, reqctx.RPCName, reqctx.Balancer, reqctx.Provider, "batch", reqctx.Client).Inc()
+		observeLatency("batch")
+		observeRequestError("batch")
+		observeResponseSizeBytes("batch")
+		if len(reqctx.Request) != len(reqctx.Response) {
+			log.Debug().
+				Int("len(reqctx.Request)", len(reqctx.Request)).
+				Int("len(reqctx.Response)", len(reqctx.Response)).
+				Msg("count mismatched")
+			return
 		}
-		metrics.ResponseSizeBytes.WithLabelValues(
-			chainID,
-			reqctx.RPCName,
-			reqctx.Provider,
-			reqctx.Balancer,
-			"batch",
-			reqctx.Client,
-		).Observe(float64(len(ctx.Response.Body())))
 		for i := range len(reqctx.Request) {
-			metrics.RequestTotalCounter.WithLabelValues(
-				chainID,
-				reqctx.RPCName,
-				reqctx.Provider,
-				reqctx.Balancer,
-				reqctx.Request[i].Method,
-				reqctx.Client,
-			).Inc()
-			if reqctx.Response[i].HasError() {
-				metrics.ClientRequestError.WithLabelValues(
-					chainID,
-					reqctx.RPCName,
-					reqctx.Provider,
-					reqctx.Balancer,
-					reqctx.Request[i].Method,
-					reqctx.Client,
-				).Inc()
-			}
+			observeTotal(reqctx.Request[i].Method)
+			observeClientError(reqctx.Response[i].HasError(), reqctx.Request[i].Method)
 		}
 	}
 }
@@ -303,8 +263,10 @@ func (srv *Server) routerHandler(
 			ctx.Error("not found", fasthttp.StatusNotFound)
 			return
 		}
-		SetChainIDToReqCtx(ctx, chainID)
-		SetRPCNameToReqCtx(ctx, strings.TrimPrefix(string(ctx.Path()), "/"))
+		SetToReqCtx(ctx, func(rc *ReqCtx) {
+			rc.ChainID = chainID
+			rc.RPCName = strings.TrimPrefix(string(ctx.Path()), "/")
+		})
 
 		httpFunc(ctx)
 	}
@@ -323,7 +285,7 @@ func (srv *Server) authMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHan
 			if c == "" {
 				c = "_unknown_"
 			}
-			SetClientToReqCtx(ctx, c)
+			SetToReqCtx(ctx, func(rc *ReqCtx) { rc.Client = c })
 			f(ctx)
 		}
 	}
@@ -332,7 +294,7 @@ func (srv *Server) authMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHan
 		header := ctx.Request.Header.Peek(authHeaderName)
 		login, pass, err := GetBasicAuthDecoded(string(header))
 
-		SetClientToReqCtx(ctx, login)
+		SetToReqCtx(ctx, func(rc *ReqCtx) { rc.Client = login })
 
 		if !srv.clients.AuthRequired {
 			f(ctx)
@@ -347,7 +309,6 @@ func (srv *Server) authMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHan
 		if !exist {
 			log.Info().
 				Uint64("request_id", ctx.ID()).
-				Uint64("conn_id", ctx.ConnID()).
 				Err(err).Msg("invalid login")
 			ctx.Error("", fasthttp.StatusUnauthorized)
 			return
@@ -355,7 +316,6 @@ func (srv *Server) authMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHan
 		if expectedPass != pass {
 			log.Info().
 				Uint64("request_id", ctx.ID()).
-				Uint64("conn_id", ctx.ConnID()).
 				Err(err).Msg("invalid pass")
 			ctx.Error("", fasthttp.StatusUnauthorized)
 			return
@@ -375,11 +335,11 @@ func GetBasicAuthDecoded(header string) (string, string, error) {
 	if err != nil {
 		return defaultClient, "", fmt.Errorf("failed to decode auth header: %w", err)
 	}
-	log, pass, _ := strings.Cut(string(decodedLoginPass), separator)
-	if log == "" {
-		log = defaultClient
+	login, pass, _ := strings.Cut(string(decodedLoginPass), separator)
+	if login == "" {
+		login = defaultClient
 	}
-	return log, pass, nil
+	return login, pass, nil
 }
 
 func (srv *Server) healthzProbeMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHandler {
@@ -398,63 +358,51 @@ func (srv *Server) healthzProbeMiddleware(f fasthttp.RequestHandler) fasthttp.Re
 
 func (srv *Server) requestResponseParserMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
-		isBatched, err := isBodyArray(ctx.Request.Body())
-		if err != nil {
-			log.Info().Uint64("request_id", ctx.ID()).Err(err).Msg("can not parse body")
-		}
+		isBatched := isBatch(ctx.Request.Body())
 
 		var request []JSONRPCRequest
 		if isBatched {
-			err = json.Unmarshal(ctx.Request.Body(), &request)
+			err := json.Unmarshal(ctx.Request.Body(), &request)
 			if err != nil {
 				log.Error().Uint64("request_id", ctx.ID()).Err(err).Msg("can not parse request")
 			}
 		} else {
-			var singleReq JSONRPCRequest
-			err = json.Unmarshal(ctx.Request.Body(), &singleReq)
+			request = append(request, JSONRPCRequest{})
+			err := json.Unmarshal(ctx.Request.Body(), &request[0])
 			if err != nil {
 				log.Error().Uint64("request_id", ctx.ID()).Err(err).Msg("can not parse request")
-			} else {
-				request = append(request, singleReq)
 			}
 		}
-		SetJSONRPCRequestToCtx(ctx, request)
+		SetToReqCtx(ctx, func(rc *ReqCtx) { rc.Request = request })
 
 		f(ctx)
 
 		var response []JSONRPCResponse
 		if isBatched {
-			err = json.Unmarshal(ctx.Response.Body(), &response)
+			err := json.Unmarshal(ctx.Response.Body(), &response)
 			if err != nil {
 				log.Error().Uint64("request_id", ctx.ID()).Err(err).Msg("can not parse response")
 			}
 		} else {
-			var singleResp JSONRPCResponse
-			err = json.Unmarshal(ctx.Response.Body(), &singleResp)
+			response = append(response, JSONRPCResponse{})
+			err := json.Unmarshal(ctx.Response.Body(), &response[0])
 			if err != nil {
 				log.Error().Uint64("request_id", ctx.ID()).Err(err).Msg("can not parse response")
-			} else {
-				response = append(response, singleResp)
 			}
 		}
-		SetJSONRPCResponseToCtx(ctx, response)
+		SetToReqCtx(ctx, func(rc *ReqCtx) { rc.Response = response })
 	}
 }
 
-func isBodyArray(body []byte) (bool, error) {
-	body = bytes.TrimSpace(body)
-	body = bytes.TrimPrefix(body, []byte("\xef\xbb\xbf"))
-	if len(body) == 0 {
-		return false, errors.New("body is empty after space trim")
+func isBatch(raw json.RawMessage) bool {
+	for _, c := range raw {
+		// skip insignificant whitespace (http://www.ietf.org/rfc/rfc4627.txt)
+		if c == 0x20 || c == 0x09 || c == 0x0a || c == 0x0d {
+			continue
+		}
+		return c == '['
 	}
-	if body[0] == '[' {
-		return true, nil
-	}
-	if body[0] == '{' {
-		return false, nil
-	}
-
-	return false, errors.New("body is invalid")
+	return false
 }
 
 func (srv *Server) loadBalancerMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHandler {
@@ -464,65 +412,59 @@ func (srv *Server) loadBalancerMiddleware(f fasthttp.RequestHandler) fasthttp.Re
 	}
 
 	return func(ctx *fasthttp.RequestCtx) {
-		switch nameToLBAlgo[string(ctx.Path())] {
+		balancerType := nameToLBAlgo[string(ctx.Path())]
+
+		var lb Balancer
+		switch balancerType {
 		case "p2cewma":
-			SetBalancerToCtx(ctx, "p2cewma")
-			srv.proccessP2CEWMA(ctx, f)
+			lb = srv.chainToP2CEWMA[string(ctx.Path())]
 		case "round-robin":
-			SetBalancerToCtx(ctx, "round-robin")
-			srv.proccessRoundRobin(ctx, f)
+			lb = srv.chainToRR[string(ctx.Path())]
 		case "least-connection":
-			SetBalancerToCtx(ctx, "least-connection")
-			srv.proccessLeastConnection(ctx, f)
+			lb = srv.chainToLC[string(ctx.Path())]
 		}
-	}
-}
-
-func (srv *Server) proccessP2CEWMA(ctx *fasthttp.RequestCtx, next fasthttp.RequestHandler) {
-	lb := srv.chainToP2CEWMA[string(ctx.Path())]
-	provider, release := lb.Borrow()
-	SetProviderToReqCtx(ctx, provider.Name)
-	SetConnURLToCtx(ctx, provider.URL)
-
-	start := time.Now()
-
-	next(ctx)
-
-	ok := ctx.Response.StatusCode() == fasthttp.StatusOK
-	reqctx := GetReqCtx(ctx)
-
-	if len(reqctx.Response) == 0 {
-		ok = false
-	}
-	for _, resp := range reqctx.Response {
-		if !resp.HasError() {
-			continue
+		if lb == nil {
+			log.Error().
+				Uint64("request_id", ctx.ID()).
+				Str("path", string(ctx.Path())).
+				Str("balancer", balancerType).
+				Msg("no balancer configured for rpc")
+			ctx.Error("internal server error", fasthttp.StatusInternalServerError)
+			return
 		}
-		if !isUserCallError(resp.Error.Code, resp.Error.Message) {
+
+		provider, release := lb.Borrow()
+
+		SetToReqCtx(ctx, func(rc *ReqCtx) {
+			rc.Balancer = balancerType
+			rc.Provider = provider.Name
+			rc.ConnURL = provider.URL
+		})
+
+		start := time.Now()
+		f(ctx)
+		latency := time.Since(start)
+
+		ok := ctx.Response.StatusCode() == fasthttp.StatusOK
+		reqctx := GetReqCtx(ctx)
+
+		if len(reqctx.Response) == 0 {
 			ok = false
-			break
 		}
+		for _, resp := range reqctx.Response {
+			if !resp.HasError() {
+				continue
+			}
+			if !isUserCallError(resp.Error.Code, resp.Error.Message) {
+				ok = false
+				break
+			}
+		}
+
+		SetToReqCtx(ctx, func(rc *ReqCtx) { rc.Latency = latency.Seconds() })
+
+		release(ok, latency)
 	}
-
-	release(ok, time.Since(start))
-}
-
-func (srv *Server) proccessLeastConnection(ctx *fasthttp.RequestCtx, next fasthttp.RequestHandler) {
-	lb := srv.chainToLC[string(ctx.Path())]
-	provider, release := lb.Borrow()
-	defer release(true, 0)
-
-	SetProviderToReqCtx(ctx, provider.Name)
-	SetConnURLToCtx(ctx, provider.URL)
-	next(ctx)
-}
-
-func (srv *Server) proccessRoundRobin(ctx *fasthttp.RequestCtx, next fasthttp.RequestHandler) {
-	lb := srv.chainToRR[string(ctx.Path())]
-	provider, _ := lb.Borrow()
-	SetProviderToReqCtx(ctx, provider.Name)
-	SetConnURLToCtx(ctx, provider.URL)
-	next(ctx)
 }
 
 func isUserCallError(code int64, msg string) bool {

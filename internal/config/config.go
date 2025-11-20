@@ -16,18 +16,33 @@ import (
 )
 
 const (
-	defaultPort       = ":8080"
-	deafultConfigPath = "/.config/rpcgate/rpcgate.yaml"
+	defaultServerPort  = 8080
+	defaultMetricsPort = 9090
+	defaultMetricsPath = "/metrics"
+	defaultConfigPath  = "/.config/rpcgate/rpcgate.yaml"
+)
+
+const (
+	ewmaSmooth         = 0.3
+	ewmaLoadNormalizer = 8
+	ewmaPenaltyDecay   = 0.8
+	ewmaCooldown       = 10 * time.Second
 )
 
 type Config struct {
+	GlobalRPCConfig
+
+	Clients Clients `yaml:"clients"`
+	Logger  Logger  `yaml:"logger"`
+	Metrics Metrics `yaml:"metrics"`
+	RPCs    []RPC   `yaml:"rpcs"`
+	Port    int64   `yaml:"port"`
+}
+
+type GlobalRPCConfig struct {
+	BalancerType    string        `yaml:"balancer_type"`
 	NoRPCValidation bool          `yaml:"no_rpc_validation"`
 	P2CEWMA         P2CEWMAConfig `yaml:"p2cewma"`
-	Clients         Clients       `yaml:"clients"`
-	Logger          Logger        `yaml:"logger"`
-	Metrics         Metrics       `yaml:"metrics"`
-	RPCs            []RPC         `yaml:"rpcs"`
-	Port            string        `yaml:"port"`
 }
 
 type Metrics struct {
@@ -37,7 +52,7 @@ type Metrics struct {
 }
 
 type Clients struct {
-	AuthRequired bool     `yaml:"auth_required"`
+	AuthRequired bool     `yaml:"auth_required"` // only for basic type of auth.
 	Type         string   `yaml:"type"`
 	Clients      []Client `yaml:"clients"`
 }
@@ -55,11 +70,11 @@ type Logger struct {
 }
 
 type RPC struct {
-	Name         string        `yaml:"name"`
-	ChainID      int64         `yaml:"chain_id"`
-	BalancerType string        `yaml:"balancer_type"`
-	P2CEWMA      P2CEWMAConfig `yaml:"p2cewma"`
-	Providers    []Provider    `yaml:"providers"`
+	GlobalRPCConfig
+
+	Name      string     `yaml:"name"`
+	ChainID   int64      `yaml:"chain_id"`
+	Providers []Provider `yaml:"providers"`
 }
 
 type Provider struct {
@@ -78,154 +93,171 @@ func ParseConfig(path string) (Config, error) {
 	if path == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return Config{}, fmt.Errorf("can not get user home dit: %w", err)
+			return Config{}, fmt.Errorf("can not get user home dir: %w", err)
 		}
-		path = home + deafultConfigPath
+		path = home + defaultConfigPath
 	}
 	var cfg Config
-	ymlBytes, err := os.ReadFile(path)
+	yml, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("can not read yaml config file: %w", err)
 	}
-	yml := string(ymlBytes)
-	placeholderToValue := parseConfigPlaceholders(yml)
-	for placeholder, value := range placeholderToValue {
-		yml = strings.ReplaceAll(yml, placeholder, value)
-	}
-
-	err = yaml.Unmarshal([]byte(yml), &cfg)
+	yml = replacePlaceholdersWithEnv(yml)
+	err = yaml.Unmarshal(yml, &cfg)
 	if err != nil {
 		return Config{}, fmt.Errorf("can not unmarshal yaml config file: %w", err)
 	}
 
-	cfg.Port = getPort(cfg.Port)
-
-	err = validateConfig(cfg)
-	if err != nil {
-		return Config{}, fmt.Errorf("can not validate config file: %w", err)
+	cfg.Port = getPort(cfg.Port, defaultServerPort)
+	cfg.Metrics.Port = getPort(cfg.Metrics.Port, defaultMetricsPort)
+	if cfg.Metrics.Path != "" {
+		cfg.Metrics.Path = "/" + strings.TrimPrefix(cfg.Metrics.Path, "/")
+	} else {
+		cfg.Metrics.Path = defaultMetricsPath
 	}
 
-	if !cfg.NoRPCValidation {
-		err = validateRPCs(cfg.RPCs)
-		if err != nil {
-			return Config{}, fmt.Errorf("can not validate rpcs: %w", err)
-		}
+	err = validateConfig(&cfg)
+	if err != nil {
+		return Config{}, fmt.Errorf("can not validate config file: %w", err)
 	}
 
 	return cfg, nil
 }
 
-func getPort(port string) string {
-	if port == "" {
+func getPort(port, defaultPort int64) int64 {
+	if port == 0 {
 		return defaultPort
-	}
-	if !strings.HasPrefix(port, ":") {
-		port = ":" + port
 	}
 
 	return port
 }
 
-//nolint:cyclop // validation of config
-func validateConfig(cfg Config) error {
-	switch cfg.Logger.Format {
-	case "", "json", "inline":
-	default:
-		return errors.New("Logger.Format incorrect, should be on of 'json', 'inline' or empty")
+func validateConfig(cfg *Config) error {
+	var emptyGlobalRPCCfg GlobalRPCConfig
+	if err := validateGlobalRPCConfig(&cfg.GlobalRPCConfig); err != nil {
+		return fmt.Errorf("global rpc config is invalid: %w", err)
 	}
-	switch cfg.Logger.Writer {
-	case "", "stdout", "none":
-	default:
-		return errors.New("Logger.Writer incorrect, should be on of 'stdout', 'none' or empty")
+	if err := validateLogger(cfg.Logger); err != nil {
+		return fmt.Errorf("logger config is invalid: %w", err)
 	}
-	switch cfg.Clients.Type {
-	case "", "basic", "query":
-	default:
-		return errors.New("Clients.Type incorrect, should be on of 'basic', 'query' or empty")
+	if err := validateClients(cfg.Clients); err != nil {
+		return fmt.Errorf("clients config is invalid: %w", err)
 	}
 
 	names := make(map[string]struct{})
 	for i, rpc := range cfg.RPCs {
 		_, exist := names[rpc.Name]
 		if exist {
-			return fmt.Errorf("RPC[%s].Name in not unique", rpc.Name)
+			return fmt.Errorf("rpc[%s].name is not unique", rpc.Name)
 		}
-
-		switch rpc.BalancerType {
-		case "":
-			cfg.RPCs[i].BalancerType = "p2cewma"
-		case "round-robin", "p2cewma", "least-connection":
-		default:
-			return fmt.Errorf(
-				"RPC[%s].BalancerType incorrect, should be on of 'round-robin', 'p2cewma', 'least-connection' or empty",
-				rpc.Name,
-			)
+		if err := validateRPCsChainID(rpc); err != nil {
+			return fmt.Errorf("rpc[%s].chain_id is invalid: %w", rpc.Name, err)
+		}
+		if rpc.GlobalRPCConfig == emptyGlobalRPCCfg {
+			cfg.RPCs[i].GlobalRPCConfig = cfg.GlobalRPCConfig
+			continue
+		}
+		if err := validateGlobalRPCConfig(&rpc.GlobalRPCConfig); err != nil {
+			return fmt.Errorf("rpc[%s] config is invalid: %w", rpc.Name, err)
 		}
 	}
 
-	err := validateP2CEWMA(cfg.P2CEWMA)
-	if err != nil {
-		return fmt.Errorf("global p2cewma config is invalid: %w", err)
+	return nil
+}
+
+func validateGlobalRPCConfig(cfg *GlobalRPCConfig) error {
+	switch cfg.BalancerType {
+	case "", "p2cewma":
+		cfg.BalancerType = "p2cewma"
+	case "round-robin", "least-connection":
+		return nil
+	default:
+		return errors.New(
+			"balancer_type incorrect, must be one of 'round-robin', 'p2cewma', 'least-connection' or empty",
+		)
 	}
 
-	for _, rpc := range cfg.RPCs {
-		err = validateP2CEWMA(rpc.P2CEWMA)
+	isEmpty := cfg.P2CEWMA == P2CEWMAConfig{}
+	if isEmpty {
+		cfg.P2CEWMA = P2CEWMAConfig{
+			Smooth:          ewmaSmooth,
+			LoadNormalizer:  ewmaLoadNormalizer,
+			PenaltyDecay:    ewmaPenaltyDecay,
+			CooldownTimeout: ewmaCooldown,
+		}
+		return nil
+	}
+
+	if cfg.P2CEWMA.Smooth < 0 || cfg.P2CEWMA.Smooth > 1 {
+		return fmt.Errorf("p2cewma.smooth incorrect, must be [0;1], got: %f", cfg.P2CEWMA.Smooth)
+	}
+	if cfg.P2CEWMA.PenaltyDecay < 0 || cfg.P2CEWMA.PenaltyDecay > 1 {
+		return fmt.Errorf("p2cewma.penalty_decay incorrect, must be [0;1], got: %f", cfg.P2CEWMA.PenaltyDecay)
+	}
+	if cfg.P2CEWMA.LoadNormalizer <= 0 {
+		return fmt.Errorf("p2cewma.load_normalizer incorrect, must be > 0, got: %f", cfg.P2CEWMA.LoadNormalizer)
+	}
+
+	return nil
+}
+
+func validateLogger(cfg Logger) error {
+	switch cfg.Format {
+	case "", "json", "inline":
+	default:
+		return errors.New("logger.format incorrect, must be on of 'json', 'inline' or empty")
+	}
+	switch cfg.Writer {
+	case "", "stdout", "none":
+	default:
+		return errors.New("logger.writer incorrect, must be on of 'stdout', 'none' or empty")
+	}
+
+	return nil
+}
+
+func validateClients(cfg Clients) error {
+	switch cfg.Type {
+	case "", "basic", "query":
+	default:
+		return errors.New("clients.type incorrect, must be on of 'basic', 'query' or empty")
+	}
+
+	return nil
+}
+
+func validateRPCsChainID(rpc RPC) error {
+	for _, provider := range rpc.Providers {
+		cli, err := ethclient.Dial(provider.ConnURL)
 		if err != nil {
-			return fmt.Errorf("RPC[%s].P2CEWMA config is invalid: %w", rpc.Name, err)
+			return fmt.Errorf("can not dial provider '%s' for chain '%d'", provider.Name, rpc.ChainID)
 		}
+		chainID, err := cli.ChainID(context.Background())
+		if err != nil {
+			return fmt.Errorf("can not get chain_id for provider '%s' for chain '%d', err: %w",
+				provider.Name, rpc.ChainID, err)
+		}
+		if chainID.Int64() != rpc.ChainID {
+			return fmt.Errorf("chain_id mismatched for provider '%s' for chain '%d', got: %d",
+				provider.Name, rpc.ChainID, chainID.Int64())
+		}
+		cli.Close()
 	}
 
 	return nil
 }
 
-func validateP2CEWMA(cfg P2CEWMAConfig) error {
-	if cfg.Smooth < 0 || cfg.Smooth > 1 {
-		return fmt.Errorf("P2CEWMAConfig.Smooth incorrect, should be [0;1], got: %f", cfg.Smooth)
-	}
-	if cfg.PenaltyDecay < 0 || cfg.PenaltyDecay > 1 {
-		return fmt.Errorf("P2CEWMAConfig.PenaltyDecay incorrect, should be [0;1], got: %f", cfg.PenaltyDecay)
-	}
-	if cfg.LoadNormalizer < 0 {
-		return fmt.Errorf("P2CEWMAConfig.LoadNormalizer incorrect, should be > 0, got: %f", cfg.LoadNormalizer)
-	}
+func replacePlaceholdersWithEnv(raw []byte) []byte {
+	re := regexp.MustCompile(`\$\{([^}]+)\}`)
 
-	return nil
-}
+	return re.ReplaceAllFunc(raw, func(match []byte) []byte {
+		// match = ${KEY}
+		key := match[2 : len(match)-1]
 
-func validateRPCs(rpcs []RPC) error {
-	for _, rpc := range rpcs {
-		for _, provider := range rpc.Providers {
-			cli, err := ethclient.Dial(provider.ConnURL)
-			if err != nil {
-				return fmt.Errorf("can not dial provider '%s' for chain '%d'", provider.Name, rpc.ChainID)
-			}
-			chainID, err := cli.ChainID(context.Background())
-			if err != nil {
-				return fmt.Errorf("can not get chainID for provider '%s' for chain '%d', err: %w",
-					provider.Name, rpc.ChainID, err)
-			}
-			if chainID.Int64() != rpc.ChainID {
-				return fmt.Errorf("chainID mismatched for provider '%s' for chain '%d', got: %d",
-					provider.Name, rpc.ChainID, chainID.Int64())
-			}
+		val, ok := os.LookupEnv(string(key))
+		if !ok {
+			log.Panic().Str("key", string(key)).Msg("env not found")
 		}
-	}
-
-	return nil
-}
-
-func parseConfigPlaceholders(rawCfg string) map[string]string {
-	re := regexp.MustCompile(`\$\{[^}]+\}`)
-	placeholders := re.FindAllString(rawCfg, -1)
-	result := make(map[string]string)
-	for _, ph := range placeholders {
-		key := strings.TrimSuffix(strings.TrimPrefix(ph, "${"), "}")
-		value, found := os.LookupEnv(key)
-		if !found {
-			log.Panic().Str("key", key).Msg("can not find env by key")
-		}
-		result[ph] = value
-	}
-
-	return result
+		return []byte(val)
+	})
 }

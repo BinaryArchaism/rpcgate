@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -17,10 +16,8 @@ import (
 )
 
 const (
-	namespace            = "rpcgate"
-	defaultPath          = "/metrics"
-	defaultPort    int64 = 9090
-	defaultTimeout       = 5 * time.Second
+	namespace      = "rpcgate"
+	defaultTimeout = 5 * time.Second
 )
 
 //nolint:gochecknoglobals // metrics
@@ -69,24 +66,17 @@ func New(cfg config.Config) *Server {
 		ResponseSizeBytes,
 	)
 	m := http.NewServeMux()
-	path := defaultPath
-	if cfg.Metrics.Path != "" {
-		path = "/" + strings.TrimPrefix(cfg.Metrics.Path, "/")
-	}
-	m.Handle(path, promhttp.HandlerFor(
+
+	m.Handle(cfg.Metrics.Path, promhttp.HandlerFor(
 		reg,
 		promhttp.HandlerOpts{
 			ErrorLog:          &promLogger{},
 			EnableOpenMetrics: true,
 		},
 	))
-	port := defaultPort
-	if cfg.Metrics.Port != 0 {
-		port = cfg.Metrics.Port
-	}
 	return &Server{
 		srv: &http.Server{
-			Addr:              fmt.Sprintf(":%d", port),
+			Addr:              fmt.Sprintf(":%d", cfg.Metrics.Port),
 			Handler:           m,
 			ReadTimeout:       defaultTimeout,
 			ReadHeaderTimeout: defaultTimeout,
