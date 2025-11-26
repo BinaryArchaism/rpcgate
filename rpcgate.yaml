@@ -15,6 +15,13 @@ clients:
   type: basic # [basic, query]
 
 rpcs:
+  - name: mainnet-wss
+    chain_id: 1
+    no_rpc_validation: true
+    providers:
+      - name: drpc
+        conn_url: wss://eth.drpc.org
+
   - name: mainnet
     chain_id: 1
     balancer_type: p2cewma
