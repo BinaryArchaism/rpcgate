@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -13,6 +14,12 @@ import (
 	"github.com/goccy/go-yaml"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+)
+
+const (
+	p2cewmaName = "p2cewma"
+	rrName      = "round-robin"
+	lcName      = "least-connection"
 )
 
 const (
@@ -30,7 +37,7 @@ const (
 )
 
 type Config struct {
-	GlobalRPCConfig
+	GlobalRPCConfig `yaml:",inline"`
 
 	Clients Clients `yaml:"clients"`
 	Logger  Logger  `yaml:"logger"`
@@ -70,7 +77,7 @@ type Logger struct {
 }
 
 type RPC struct {
-	GlobalRPCConfig
+	GlobalRPCConfig `yaml:",inline"`
 
 	Name      string     `yaml:"name"`
 	ChainID   int64      `yaml:"chain_id"`
@@ -133,7 +140,6 @@ func getPort(port, defaultPort int64) int64 {
 }
 
 func validateConfig(cfg *Config) error {
-	var emptyGlobalRPCCfg GlobalRPCConfig
 	if err := validateGlobalRPCConfig(&cfg.GlobalRPCConfig); err != nil {
 		return fmt.Errorf("global rpc config is invalid: %w", err)
 	}
@@ -143,15 +149,25 @@ func validateConfig(cfg *Config) error {
 	if err := validateClients(cfg.Clients); err != nil {
 		return fmt.Errorf("clients config is invalid: %w", err)
 	}
+	if err := validateRPCs(cfg); err != nil {
+		return fmt.Errorf("rpc config is invalid: %w", err)
+	}
+	return nil
+}
 
+func validateRPCs(cfg *Config) error {
+	var emptyGlobalRPCCfg GlobalRPCConfig
 	names := make(map[string]struct{})
 	for i, rpc := range cfg.RPCs {
+		if len(rpc.Providers) == 0 {
+			return fmt.Errorf("rpc[%s].name is not unique", rpc.Name)
+		}
 		_, exist := names[rpc.Name]
 		if exist {
 			return fmt.Errorf("rpc[%s].name is not unique", rpc.Name)
 		}
-		if err := validateRPCsChainID(rpc); err != nil {
-			return fmt.Errorf("rpc[%s].chain_id is invalid: %w", rpc.Name, err)
+		if err := validateProviderConnURL(rpc); err != nil {
+			return fmt.Errorf("rpc[%s] config is invalid: %w", rpc.Name, err)
 		}
 		if rpc.GlobalRPCConfig == emptyGlobalRPCCfg {
 			cfg.RPCs[i].GlobalRPCConfig = cfg.GlobalRPCConfig
@@ -160,16 +176,50 @@ func validateConfig(cfg *Config) error {
 		if err := validateGlobalRPCConfig(&rpc.GlobalRPCConfig); err != nil {
 			return fmt.Errorf("rpc[%s] config is invalid: %w", rpc.Name, err)
 		}
+		if !rpc.NoRPCValidation {
+			if err := validateRPCsChainID(rpc); err != nil {
+				return fmt.Errorf("rpc[%s].chain_id is invalid: %w", rpc.Name, err)
+			}
+		}
 	}
-
 	return nil
+}
+
+func validateProviderConnURL(rpc RPC) error {
+	var http, ws int
+	for _, provider := range rpc.Providers {
+		parsedURL, err := url.Parse(provider.ConnURL)
+		if err != nil {
+			return fmt.Errorf("rpc[%s].provider[%s].conn_url invalid", rpc.Name, provider.Name)
+		}
+		switch parsedURL.Scheme {
+		case "http", "https":
+			http++
+		case "ws", "wss":
+			if rpc.BalancerType == "" || rpc.BalancerType == p2cewmaName {
+				return fmt.Errorf("rpc[%s].balancer_type is unsupported for websocket", rpc.Name)
+			}
+			ws++
+		default:
+			return fmt.Errorf(
+				"rpc[%s].provider[%s].conn_url scheme invalid: %s",
+				rpc.Name,
+				provider.Name,
+				parsedURL.Scheme,
+			)
+		}
+	}
+	if http*ws == 0 {
+		return nil
+	}
+	return fmt.Errorf("rpc[%s] has both http and websocket connections", rpc.Name)
 }
 
 func validateGlobalRPCConfig(cfg *GlobalRPCConfig) error {
 	switch cfg.BalancerType {
-	case "", "p2cewma":
-		cfg.BalancerType = "p2cewma"
-	case "round-robin", "least-connection":
+	case "", p2cewmaName:
+		cfg.BalancerType = p2cewmaName
+	case rrName, lcName:
 		return nil
 	default:
 		return errors.New(

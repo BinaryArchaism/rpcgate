@@ -10,8 +10,10 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/fasthttp/websocket"
 	"github.com/rs/zerolog/log"
 	"github.com/valyala/fasthttp"
 
@@ -51,15 +53,17 @@ func New(cfg config.Config) *Server {
 	}
 
 	handler := srv.recoverHandler(
-		srv.healthzProbeMiddleware(
-			srv.loggingMiddleware(
-				srv.metricsMiddleware(
-					srv.authMiddleware(
-						srv.routerHandler(
-							srv.loadBalancerMiddleware(
-								srv.requestResponseParserMiddleware(
-									srv.handler)),
-						))))))
+		srv.transportRouter(
+			srv.healthzProbeMiddleware(
+				srv.loggingMiddleware(
+					srv.metricsMiddleware(
+						srv.authMiddleware(
+							srv.routerHandler(
+								srv.loadBalancerMiddleware(
+									srv.requestResponseParserMiddleware(
+										srv.handler)),
+							))))),
+			srv.wsLoggingMiddleware(srv.authMiddleware(srv.routerHandler(srv.loadBalancerMiddleware(srv.websocket))))))
 
 	for _, rpc := range cfg.RPCs {
 		providers := make([]balancer.Payload, 0, len(rpc.Providers))
@@ -140,7 +144,7 @@ func (srv *Server) handler(ctx *fasthttp.RequestCtx) {
 	resp.Header.CopyTo(&ctx.Response.Header)
 }
 
-func (srv *Server) recoverHandler(f fasthttp.RequestHandler) fasthttp.RequestHandler {
+func (srv *Server) recoverHandler(next fasthttp.RequestHandler) fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -154,14 +158,14 @@ func (srv *Server) recoverHandler(f fasthttp.RequestHandler) fasthttp.RequestHan
 				ctx.Error("internal server error", fasthttp.StatusInternalServerError)
 			}
 		}()
-		f(ctx)
+		next(ctx)
 	}
 }
 
-func (srv *Server) loggingMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHandler {
+func (srv *Server) loggingMiddleware(next fasthttp.RequestHandler) fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
 		start := time.Now()
-		f(ctx)
+		next(ctx)
 
 		reqctx := GetReqCtx(ctx)
 		log.Info().
@@ -177,17 +181,17 @@ func (srv *Server) loggingMiddleware(f fasthttp.RequestHandler) fasthttp.Request
 	}
 }
 
-func (srv *Server) metricsMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHandler {
+func (srv *Server) metricsMiddleware(next fasthttp.RequestHandler) fasthttp.RequestHandler {
 	const base = 10
 
 	if !srv.metricsCfg.Enabled {
 		return func(ctx *fasthttp.RequestCtx) {
-			f(ctx)
+			next(ctx)
 		}
 	}
 
 	return func(ctx *fasthttp.RequestCtx) {
-		f(ctx)
+		next(ctx)
 
 		reqctx := GetReqCtx(ctx)
 		chainID := strconv.FormatInt(reqctx.ChainID, base)
@@ -248,9 +252,7 @@ func (srv *Server) metricsMiddleware(f fasthttp.RequestHandler) fasthttp.Request
 	}
 }
 
-func (srv *Server) routerHandler(
-	httpFunc fasthttp.RequestHandler,
-) fasthttp.RequestHandler {
+func (srv *Server) routerHandler(next fasthttp.RequestHandler) fasthttp.RequestHandler {
 	nameToChainID := make(map[string]int64)
 	for _, rpc := range srv.rpcs {
 		nameToChainID["/"+rpc.Name] = rpc.ChainID
@@ -268,11 +270,119 @@ func (srv *Server) routerHandler(
 			rc.RPCName = strings.TrimPrefix(string(ctx.Path()), "/")
 		})
 
-		httpFunc(ctx)
+		next(ctx)
 	}
 }
 
-func (srv *Server) authMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHandler {
+const bufferSize = 1024
+
+var upgrader = websocket.FastHTTPUpgrader{ //nolint:gochecknoglobals
+	ReadBufferSize:  bufferSize,
+	WriteBufferSize: bufferSize,
+}
+
+func (srv *Server) initWSConnWithProvider(connURL string) (*websocket.Conn, error) {
+	providerConn, resp, err := websocket.DefaultDialer.Dial(connURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("can not dial websocket connection to provider: %w", err)
+	}
+	if resp.StatusCode != fasthttp.StatusSwitchingProtocols {
+		return nil, fmt.Errorf("invalid status code of switching protocols: %d", resp.StatusCode)
+	}
+
+	return providerConn, nil
+}
+
+func nonBlockingChanSend(errChan chan error, err error) {
+	select {
+	case errChan <- err:
+	default:
+	}
+}
+
+func (srv *Server) wsPipe(readConn, writeConn *websocket.Conn, readErrChan, writeErrChan chan error) {
+	var err error
+	for {
+		var msg json.RawMessage
+		err = readConn.ReadJSON(&msg)
+		if err != nil {
+			nonBlockingChanSend(readErrChan, err)
+			return
+		}
+		err = writeConn.WriteJSON(msg)
+		if err != nil {
+			nonBlockingChanSend(writeErrChan, err)
+			return
+		}
+	}
+}
+
+func (srv *Server) websocket(ctx *fasthttp.RequestCtx) {
+	reqctx := GetReqCtx(ctx)
+	requestID := ctx.ID()
+	upgradeErr := upgrader.Upgrade(ctx, func(clientConn *websocket.Conn) {
+		defer clientConn.Close()
+
+		providerConn, err := srv.initWSConnWithProvider(reqctx.ConnURL)
+		if err != nil {
+			_ = clientConn.WriteMessage(websocket.CloseMessage, nil)
+			log.Error().
+				Err(err).
+				Uint64("request_id", requestID).
+				Str("provider", reqctx.Provider).
+				Msg("can not init connection to provider")
+			return
+		}
+		defer providerConn.Close()
+
+		var (
+			upstreamError = make(chan error, 1)
+			clientError   = make(chan error, 1)
+		)
+
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			srv.wsPipe(clientConn, providerConn, clientError, upstreamError)
+		})
+		wg.Go(func() {
+			srv.wsPipe(providerConn, clientConn, upstreamError, clientError)
+		})
+		wg.Go(func() {
+			var (
+				msg    string
+				status int
+			)
+			select {
+			case err = <-upstreamError:
+				if !websocket.IsCloseError(err, websocket.CloseAbnormalClosure, websocket.CloseNormalClosure) {
+					log.Err(err).Uint64("request_id", requestID).Str("provider", reqctx.Provider).Msg("upstream error")
+					status = websocket.CloseGoingAway
+					msg = fmt.Sprintf("upstream [%s] error: %v", reqctx.Provider, err)
+				} else {
+					status = websocket.CloseNormalClosure
+					msg = fmt.Sprintf("upstream [%s] closed connection", reqctx.Provider)
+				}
+				_ = clientConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(status, msg))
+			case err = <-clientError:
+				_ = providerConn.WriteMessage(websocket.CloseMessage, nil)
+				if !websocket.IsCloseError(err, websocket.CloseAbnormalClosure, websocket.CloseNormalClosure) {
+					log.Err(err).Uint64("request_id", requestID).Str("client", reqctx.Client).Msg("client error")
+				}
+			}
+		})
+		wg.Wait()
+		log.Info().
+			Uint64("request_id", requestID).
+			Str("client", reqctx.Client).
+			Str("provider", reqctx.Provider).
+			Msg("websocket closed")
+	})
+	if upgradeErr != nil {
+		log.Error().Err(upgradeErr).Uint64("request_id", requestID).Msg("error during handshake")
+	}
+}
+
+func (srv *Server) authMiddleware(next fasthttp.RequestHandler) fasthttp.RequestHandler {
 	const authHeaderName = "Authorization"
 	loginToPass := make(map[string]string)
 	for _, c := range srv.clients.Clients {
@@ -286,7 +396,7 @@ func (srv *Server) authMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHan
 				c = "_unknown_"
 			}
 			SetToReqCtx(ctx, func(rc *ReqCtx) { rc.Client = c })
-			f(ctx)
+			next(ctx)
 		}
 	}
 
@@ -297,7 +407,7 @@ func (srv *Server) authMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHan
 		SetToReqCtx(ctx, func(rc *ReqCtx) { rc.Client = login })
 
 		if !srv.clients.AuthRequired {
-			f(ctx)
+			next(ctx)
 			return
 		}
 		if err != nil {
@@ -320,7 +430,7 @@ func (srv *Server) authMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHan
 			ctx.Error("", fasthttp.StatusUnauthorized)
 			return
 		}
-		f(ctx)
+		next(ctx)
 	}
 }
 
@@ -342,21 +452,20 @@ func GetBasicAuthDecoded(header string) (string, string, error) {
 	return login, pass, nil
 }
 
-func (srv *Server) healthzProbeMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHandler {
+func (srv *Server) healthzProbeMiddleware(next fasthttp.RequestHandler) fasthttp.RequestHandler {
 	const healthzProbePath = "/healthz"
 
 	return func(ctx *fasthttp.RequestCtx) {
-		if string(ctx.Path()) != healthzProbePath {
-			f(ctx)
+		if string(ctx.Path()) == healthzProbePath {
+			ctx.Response.SetStatusCode(fasthttp.StatusOK)
+			ctx.Response.SetBodyString("ok")
 			return
 		}
-
-		ctx.Response.SetStatusCode(fasthttp.StatusOK)
-		ctx.Response.SetBodyString("ok")
+		next(ctx)
 	}
 }
 
-func (srv *Server) requestResponseParserMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHandler {
+func (srv *Server) requestResponseParserMiddleware(next fasthttp.RequestHandler) fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
 		isBatched := isBatch(ctx.Request.Body())
 
@@ -375,7 +484,7 @@ func (srv *Server) requestResponseParserMiddleware(f fasthttp.RequestHandler) fa
 		}
 		SetToReqCtx(ctx, func(rc *ReqCtx) { rc.Request = request })
 
-		f(ctx)
+		next(ctx)
 
 		var response []JSONRPCResponse
 		if isBatched {
@@ -405,7 +514,7 @@ func isBatch(raw json.RawMessage) bool {
 	return false
 }
 
-func (srv *Server) loadBalancerMiddleware(f fasthttp.RequestHandler) fasthttp.RequestHandler {
+func (srv *Server) loadBalancerMiddleware(next fasthttp.RequestHandler) fasthttp.RequestHandler {
 	nameToLBAlgo := make(map[string]string)
 	for _, rpc := range srv.rpcs {
 		nameToLBAlgo["/"+rpc.Name] = rpc.BalancerType
@@ -442,7 +551,7 @@ func (srv *Server) loadBalancerMiddleware(f fasthttp.RequestHandler) fasthttp.Re
 		})
 
 		start := time.Now()
-		f(ctx)
+		next(ctx)
 		latency := time.Since(start)
 
 		ok := ctx.Response.StatusCode() == fasthttp.StatusOK
@@ -472,7 +581,7 @@ func isUserCallError(code int64, msg string) bool {
 	case -32003, -32004, -32006, -32010, -32600, -32700:
 		return true
 	case -32601:
-		// TODO required methods validation
+		// TODO: required methods validation
 		return true
 	case -32602:
 		m := strings.ToLower(msg)
@@ -488,4 +597,33 @@ func isUserCallError(code int64, msg string) bool {
 		}
 	}
 	return false
+}
+
+func (srv *Server) transportRouter(httpFn, wsFn fasthttp.RequestHandler) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		if websocket.FastHTTPIsWebSocketUpgrade(ctx) {
+			wsFn(ctx)
+		} else {
+			httpFn(ctx)
+		}
+	}
+}
+
+func (srv *Server) wsLoggingMiddleware(next fasthttp.RequestHandler) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		start := time.Now()
+		next(ctx)
+
+		reqctx := GetReqCtx(ctx)
+		log.Info().
+			Uint64("request_id", ctx.ID()).
+			Uint64("conn_id", ctx.ConnID()).
+			Str("remote_ip", ctx.RemoteIP().String()).
+			Int("status", ctx.Response.StatusCode()).
+			Str("latency", time.Since(start).String()).
+			Str("path", string(ctx.Path())).
+			Str("client", reqctx.Client).
+			Str("provider", reqctx.Provider).
+			Msg("websocket started")
+	}
 }
