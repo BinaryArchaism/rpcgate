@@ -274,66 +274,111 @@ func (srv *Server) routerHandler(next fasthttp.RequestHandler) fasthttp.RequestH
 	}
 }
 
-var upgrader = websocket.FastHTTPUpgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
+const bufferSize = 1024
+
+var upgrader = websocket.FastHTTPUpgrader{ //nolint:gochecknoglobals
+	ReadBufferSize:  bufferSize,
+	WriteBufferSize: bufferSize,
+}
+
+func (srv *Server) initWSConnWithProvider(connURL string) (*websocket.Conn, error) {
+	providerConn, resp, err := websocket.DefaultDialer.Dial(connURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("can not dial websocket connection to provider: %w", err)
+	}
+	if resp.StatusCode != fasthttp.StatusSwitchingProtocols {
+		return nil, fmt.Errorf("invalid status code of switching protocols: %d", resp.StatusCode)
+	}
+
+	return providerConn, nil
+}
+
+func nonBlockingChanSend(errChan chan error, err error) {
+	select {
+	case errChan <- err:
+	default:
+	}
+}
+
+func (srv *Server) wsPipe(readConn, writeConn *websocket.Conn, readErrChan, writeErrChan chan error) {
+	var err error
+	for {
+		var msg json.RawMessage
+		err = readConn.ReadJSON(&msg)
+		if err != nil {
+			nonBlockingChanSend(readErrChan, err)
+			return
+		}
+		err = writeConn.WriteJSON(msg)
+		if err != nil {
+			nonBlockingChanSend(writeErrChan, err)
+			return
+		}
+	}
 }
 
 func (srv *Server) websocket(ctx *fasthttp.RequestCtx) {
-	err := upgrader.Upgrade(ctx, func(conn *websocket.Conn) {
-		reqctx := GetReqCtx(ctx)
-		providerConn, resp, err := websocket.DefaultDialer.Dial(reqctx.ConnURL, nil)
+	reqctx := GetReqCtx(ctx)
+	requestID := ctx.ID()
+	upgradeErr := upgrader.Upgrade(ctx, func(clientConn *websocket.Conn) {
+		defer clientConn.Close()
+
+		providerConn, err := srv.initWSConnWithProvider(reqctx.ConnURL)
 		if err != nil {
-			log.Error().Err(err).Msg("")
+			_ = clientConn.WriteMessage(websocket.CloseMessage, nil)
+			log.Error().
+				Err(err).
+				Uint64("request_id", requestID).
+				Str("provider", reqctx.Provider).
+				Msg("can not init connection to provider")
 			return
 		}
-		if resp.StatusCode != fasthttp.StatusSwitchingProtocols {
-			log.Error().Int("status", resp.StatusCode).Msg("")
-			return
-		}
-		respChan := make(chan []byte)
-		reqChan := make(chan []byte)
-		done := make(chan error)
-		wg := sync.WaitGroup{}
+		defer providerConn.Close()
+
+		var (
+			upstreamError = make(chan error, 1)
+			clientError   = make(chan error, 1)
+		)
+
+		var wg sync.WaitGroup
 		wg.Go(func() {
-			for {
-				messageType, p, err := conn.ReadMessage()
-				if err != nil {
-					log.Error().Err(err).Msg("")
-					close(done)
-					return
+			srv.wsPipe(clientConn, providerConn, clientError, upstreamError)
+		})
+		wg.Go(func() {
+			srv.wsPipe(providerConn, clientConn, upstreamError, clientError)
+		})
+		wg.Go(func() {
+			var (
+				msg    string
+				status int
+			)
+			select {
+			case err = <-upstreamError:
+				if !websocket.IsCloseError(err, websocket.CloseAbnormalClosure, websocket.CloseNormalClosure) {
+					log.Err(err).Uint64("request_id", requestID).Str("provider", reqctx.Provider).Msg("upstream error")
+					status = websocket.CloseGoingAway
+					msg = fmt.Sprintf("upstream [%s] error: %v", reqctx.Provider, err)
+				} else {
+					status = websocket.CloseNormalClosure
+					msg = fmt.Sprintf("upstream [%s] closed connection", reqctx.Provider)
 				}
-				reqChan <- p
-				resp := <-respChan
-				if err := conn.WriteMessage(messageType, resp); err != nil {
-					log.Error().Err(err).Msg("")
-					return
+				_ = clientConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(status, msg))
+			case err = <-clientError:
+				_ = providerConn.WriteMessage(websocket.CloseMessage, nil)
+				if !websocket.IsCloseError(err, websocket.CloseAbnormalClosure, websocket.CloseNormalClosure) {
+					log.Err(err).Uint64("request_id", requestID).Str("client", reqctx.Client).Msg("client error")
 				}
 			}
 		})
-		go func() {
-			for {
-				req := <-reqChan
-				if err := providerConn.WriteMessage(1, req); err != nil {
-					log.Error().Err(err).Msg("")
-					return
-				}
-				messageType, p, err := providerConn.ReadMessage()
-				fmt.Println(messageType)
-				if err != nil {
-					log.Error().Err(err).Msg("")
-					return
-				}
-				respChan <- p
-			}
-		}()
 		wg.Wait()
+		log.Info().
+			Uint64("request_id", requestID).
+			Str("client", reqctx.Client).
+			Str("provider", reqctx.Provider).
+			Msg("websocket closed")
 	})
-	if err != nil {
-		if errors.Is(err, websocket.ErrBadHandshake) {
-		}
-		ctx.Error("", fasthttp.StatusMethodNotAllowed)
-		return
+	if upgradeErr != nil {
+		log.Error().Err(upgradeErr).Uint64("request_id", requestID).Msg("error during handshake")
 	}
 }
 
@@ -536,7 +581,7 @@ func isUserCallError(code int64, msg string) bool {
 	case -32003, -32004, -32006, -32010, -32600, -32700:
 		return true
 	case -32601:
-		// TODO required methods validation
+		// TODO: required methods validation
 		return true
 	case -32602:
 		m := strings.ToLower(msg)
@@ -554,7 +599,7 @@ func isUserCallError(code int64, msg string) bool {
 	return false
 }
 
-func (src *Server) transportRouter(httpFn, wsFn fasthttp.RequestHandler) fasthttp.RequestHandler {
+func (srv *Server) transportRouter(httpFn, wsFn fasthttp.RequestHandler) fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
 		if websocket.FastHTTPIsWebSocketUpgrade(ctx) {
 			wsFn(ctx)
@@ -566,6 +611,19 @@ func (src *Server) transportRouter(httpFn, wsFn fasthttp.RequestHandler) fasthtt
 
 func (srv *Server) wsLoggingMiddleware(next fasthttp.RequestHandler) fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
+		start := time.Now()
 		next(ctx)
+
+		reqctx := GetReqCtx(ctx)
+		log.Info().
+			Uint64("request_id", ctx.ID()).
+			Uint64("conn_id", ctx.ConnID()).
+			Str("remote_ip", ctx.RemoteIP().String()).
+			Int("status", ctx.Response.StatusCode()).
+			Str("latency", time.Since(start).String()).
+			Str("path", string(ctx.Path())).
+			Str("client", reqctx.Client).
+			Str("provider", reqctx.Provider).
+			Msg("websocket started")
 	}
 }

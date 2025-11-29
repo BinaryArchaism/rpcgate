@@ -17,8 +17,11 @@ clients:
 rpcs:
   - name: mainnet-wss
     chain_id: 1
-    no_rpc_validation: true
+    no_rpc_validation: false
+    balancer_type: least-connection
     providers:
+      - name: publicnode
+        conn_url: wss://ethereum-rpc.publicnode.com
       - name: drpc
         conn_url: wss://eth.drpc.org
 

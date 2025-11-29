@@ -17,6 +17,12 @@ import (
 )
 
 const (
+	p2cewmaName = "p2cewma"
+	rrName      = "round-robin"
+	lcName      = "least-connection"
+)
+
+const (
 	defaultServerPort  = 8080
 	defaultMetricsPort = 9090
 	defaultMetricsPath = "/metrics"
@@ -31,7 +37,7 @@ const (
 )
 
 type Config struct {
-	GlobalRPCConfig
+	GlobalRPCConfig `yaml:",inline"`
 
 	Clients Clients `yaml:"clients"`
 	Logger  Logger  `yaml:"logger"`
@@ -71,7 +77,7 @@ type Logger struct {
 }
 
 type RPC struct {
-	GlobalRPCConfig
+	GlobalRPCConfig `yaml:",inline"`
 
 	Name      string     `yaml:"name"`
 	ChainID   int64      `yaml:"chain_id"`
@@ -160,8 +166,8 @@ func validateRPCs(cfg *Config) error {
 		if exist {
 			return fmt.Errorf("rpc[%s].name is not unique", rpc.Name)
 		}
-		if err := validateRPCsChainID(rpc); err != nil {
-			return fmt.Errorf("rpc[%s].chain_id is invalid: %w", rpc.Name, err)
+		if err := validateProviderConnURL(rpc); err != nil {
+			return fmt.Errorf("rpc[%s] config is invalid: %w", rpc.Name, err)
 		}
 		if rpc.GlobalRPCConfig == emptyGlobalRPCCfg {
 			cfg.RPCs[i].GlobalRPCConfig = cfg.GlobalRPCConfig
@@ -170,8 +176,10 @@ func validateRPCs(cfg *Config) error {
 		if err := validateGlobalRPCConfig(&rpc.GlobalRPCConfig); err != nil {
 			return fmt.Errorf("rpc[%s] config is invalid: %w", rpc.Name, err)
 		}
-		if err := validateProviderConnURL(rpc); err != nil {
-			return fmt.Errorf("rpc[%s] config is invalid: %w", rpc.Name, err)
+		if !rpc.NoRPCValidation {
+			if err := validateRPCsChainID(rpc); err != nil {
+				return fmt.Errorf("rpc[%s].chain_id is invalid: %w", rpc.Name, err)
+			}
 		}
 	}
 	return nil
@@ -188,7 +196,7 @@ func validateProviderConnURL(rpc RPC) error {
 		case "http", "https":
 			http++
 		case "ws", "wss":
-			if rpc.BalancerType == "" || rpc.BalancerType == "p2cewma" {
+			if rpc.BalancerType == "" || rpc.BalancerType == p2cewmaName {
 				return fmt.Errorf("rpc[%s].balancer_type is unsupported for websocket", rpc.Name)
 			}
 			ws++
@@ -209,9 +217,9 @@ func validateProviderConnURL(rpc RPC) error {
 
 func validateGlobalRPCConfig(cfg *GlobalRPCConfig) error {
 	switch cfg.BalancerType {
-	case "", "p2cewma":
-		cfg.BalancerType = "p2cewma"
-	case "round-robin", "least-connection":
+	case "", p2cewmaName:
+		cfg.BalancerType = p2cewmaName
+	case rrName, lcName:
 		return nil
 	default:
 		return errors.New(
