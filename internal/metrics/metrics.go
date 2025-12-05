@@ -18,6 +18,9 @@ import (
 const (
 	namespace      = "rpcgate"
 	defaultTimeout = 5 * time.Second
+
+	HTTPTransport      = "http"
+	WebsocketTransport = "websocket"
 )
 
 //nolint:gochecknoglobals // metrics
@@ -32,22 +35,27 @@ var (
 		Namespace: namespace,
 		Name:      "request_total",
 		Help:      "Request total",
-	}, []string{"chain_id", "rpc_name", "provider", "balancer", "method", "client"})
+	}, []string{"chain_id", "rpc_name", "transport", "provider", "balancer", "method", "client"})
 	RequestError = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "request_error_total",
 		Help:      "Request error total",
-	}, []string{"chain_id", "rpc_name", "provider", "balancer", "method", "client"})
+	}, []string{"chain_id", "rpc_name", "transport", "provider", "balancer", "method", "client"})
 	ClientRequestError = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "client_request_error_total",
 		Help:      "Client request error total",
-	}, []string{"chain_id", "rpc_name", "provider", "balancer", "method", "client"})
+	}, []string{"chain_id", "rpc_name", "transport", "provider", "balancer", "method", "client"})
 	ResponseSizeBytes = prometheus.NewSummaryVec(prometheus.SummaryOpts{
 		Namespace: namespace,
 		Name:      "response_size_bytes",
 		Help:      "Response size bytes gauge",
-	}, []string{"chain_id", "rpc_name", "provider", "balancer", "method", "client"})
+	}, []string{"chain_id", "rpc_name", "transport", "provider", "balancer", "method", "client"})
+	WSConnTotalCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "ws_connection_total",
+		Help:      "Websocket Connection total",
+	}, []string{"chain_id", "rpc_name", "provider", "balancer", "client"})
 )
 
 type Server struct {
