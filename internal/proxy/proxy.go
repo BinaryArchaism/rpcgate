@@ -36,6 +36,8 @@ type Server struct {
 	chainToP2CEWMA map[string]*balancer.P2CEWMA
 	chainToRR      map[string]*balancer.RoundRobin
 	chainToLC      map[string]*balancer.LeastConnection
+	nameToLBAlgo   map[string]string
+	nameToChainID  map[string]int64
 	done           chan struct{}
 }
 
@@ -63,7 +65,12 @@ func New(cfg config.Config) *Server {
 									srv.requestResponseParserMiddleware(
 										srv.handler)),
 							))))),
-			srv.wsLoggingMiddleware(srv.authMiddleware(srv.routerHandler(srv.loadBalancerMiddleware(srv.websocket))))))
+			srv.wsLoggingMiddleware(
+				srv.authMiddleware(
+					srv.routerHandler(
+						srv.wsUpgrader(
+							srv.wsLoadBalancerMiddleware(
+								srv.wsHandler)))))))
 
 	for _, rpc := range cfg.RPCs {
 		providers := make([]balancer.Payload, 0, len(rpc.Providers))
@@ -75,7 +82,7 @@ func New(cfg config.Config) *Server {
 		}
 		key := "/" + rpc.Name
 		switch rpc.BalancerType {
-		case "p2cewma":
+		case config.P2CEWMAName:
 			srv.chainToP2CEWMA[key] = balancer.NewP2CEWMA(
 				providers,
 				rpc.P2CEWMA.Smooth,
@@ -83,13 +90,22 @@ func New(cfg config.Config) *Server {
 				rpc.P2CEWMA.PenaltyDecay,
 				rpc.P2CEWMA.CooldownTimeout,
 			)
-		case "round-robin":
+		case config.RRName:
 			srv.chainToRR[key] = balancer.NewRoundRobin(providers)
-		case "least-connection":
+		case config.LCName:
 			srv.chainToLC[key] = balancer.NewLeastConnection(providers)
 		}
 	}
 
+	nameToLBAlgo := make(map[string]string)
+	nameToChainID := make(map[string]int64)
+	for _, rpc := range srv.rpcs {
+		nameToLBAlgo["/"+rpc.Name] = rpc.BalancerType
+		nameToChainID["/"+rpc.Name] = rpc.ChainID
+	}
+
+	srv.nameToLBAlgo = nameToLBAlgo
+	srv.nameToChainID = nameToChainID
 	srv.srv = &fasthttp.Server{
 		Handler: handler,
 	}
@@ -203,26 +219,38 @@ func (srv *Server) metricsMiddleware(next fasthttp.RequestHandler) fasthttp.Requ
 		}
 		observeTotal := func(method string) {
 			metrics.RequestTotalCounter.WithLabelValues(
-				chainID, reqctx.RPCName, reqctx.Provider, reqctx.Balancer, method, reqctx.Client,
+				chainID, reqctx.RPCName, metrics.HTTPTransport, reqctx.Provider, reqctx.Balancer, method, reqctx.Client,
 			).Inc()
 		}
 		observeClientError := func(hasErr bool, method string) {
 			if hasErr {
 				metrics.ClientRequestError.WithLabelValues(
-					chainID, reqctx.RPCName, reqctx.Provider, reqctx.Balancer, method, reqctx.Client,
+					chainID,
+					reqctx.RPCName,
+					metrics.HTTPTransport,
+					reqctx.Provider,
+					reqctx.Balancer,
+					method,
+					reqctx.Client,
 				).Inc()
 			}
 		}
 		observeRequestError := func(method string) {
 			if ctx.Response.StatusCode() != fasthttp.StatusOK {
 				metrics.RequestError.WithLabelValues(
-					chainID, reqctx.RPCName, reqctx.Provider, reqctx.Balancer, method, reqctx.Client,
+					chainID,
+					reqctx.RPCName,
+					metrics.HTTPTransport,
+					reqctx.Provider,
+					reqctx.Balancer,
+					method,
+					reqctx.Client,
 				).Inc()
 			}
 		}
 		observeResponseSizeBytes := func(method string) {
 			metrics.ResponseSizeBytes.WithLabelValues(
-				chainID, reqctx.RPCName, reqctx.Provider, reqctx.Balancer, method, reqctx.Client,
+				chainID, reqctx.RPCName, metrics.HTTPTransport, reqctx.Provider, reqctx.Balancer, method, reqctx.Client,
 			).Observe(float64(len(ctx.Response.Body())))
 		}
 
@@ -253,13 +281,8 @@ func (srv *Server) metricsMiddleware(next fasthttp.RequestHandler) fasthttp.Requ
 }
 
 func (srv *Server) routerHandler(next fasthttp.RequestHandler) fasthttp.RequestHandler {
-	nameToChainID := make(map[string]int64)
-	for _, rpc := range srv.rpcs {
-		nameToChainID["/"+rpc.Name] = rpc.ChainID
-	}
-
 	return func(ctx *fasthttp.RequestCtx) {
-		chainID, exist := nameToChainID[string(ctx.Path())]
+		chainID, exist := srv.nameToChainID[string(ctx.Path())]
 		if !exist {
 			log.Debug().Uint64("request_id", ctx.ID()).Msg("unknown path")
 			ctx.Error("not found", fasthttp.StatusNotFound)
@@ -271,114 +294,6 @@ func (srv *Server) routerHandler(next fasthttp.RequestHandler) fasthttp.RequestH
 		})
 
 		next(ctx)
-	}
-}
-
-const bufferSize = 1024
-
-var upgrader = websocket.FastHTTPUpgrader{ //nolint:gochecknoglobals
-	ReadBufferSize:  bufferSize,
-	WriteBufferSize: bufferSize,
-}
-
-func (srv *Server) initWSConnWithProvider(connURL string) (*websocket.Conn, error) {
-	providerConn, resp, err := websocket.DefaultDialer.Dial(connURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("can not dial websocket connection to provider: %w", err)
-	}
-	if resp.StatusCode != fasthttp.StatusSwitchingProtocols {
-		return nil, fmt.Errorf("invalid status code of switching protocols: %d", resp.StatusCode)
-	}
-
-	return providerConn, nil
-}
-
-func nonBlockingChanSend(errChan chan error, err error) {
-	select {
-	case errChan <- err:
-	default:
-	}
-}
-
-func (srv *Server) wsPipe(readConn, writeConn *websocket.Conn, readErrChan, writeErrChan chan error) {
-	var err error
-	for {
-		var msg json.RawMessage
-		err = readConn.ReadJSON(&msg)
-		if err != nil {
-			nonBlockingChanSend(readErrChan, err)
-			return
-		}
-		err = writeConn.WriteJSON(msg)
-		if err != nil {
-			nonBlockingChanSend(writeErrChan, err)
-			return
-		}
-	}
-}
-
-func (srv *Server) websocket(ctx *fasthttp.RequestCtx) {
-	reqctx := GetReqCtx(ctx)
-	requestID := ctx.ID()
-	upgradeErr := upgrader.Upgrade(ctx, func(clientConn *websocket.Conn) {
-		defer clientConn.Close()
-
-		providerConn, err := srv.initWSConnWithProvider(reqctx.ConnURL)
-		if err != nil {
-			_ = clientConn.WriteMessage(websocket.CloseMessage, nil)
-			log.Error().
-				Err(err).
-				Uint64("request_id", requestID).
-				Str("provider", reqctx.Provider).
-				Msg("can not init connection to provider")
-			return
-		}
-		defer providerConn.Close()
-
-		var (
-			upstreamError = make(chan error, 1)
-			clientError   = make(chan error, 1)
-		)
-
-		var wg sync.WaitGroup
-		wg.Go(func() {
-			srv.wsPipe(clientConn, providerConn, clientError, upstreamError)
-		})
-		wg.Go(func() {
-			srv.wsPipe(providerConn, clientConn, upstreamError, clientError)
-		})
-		wg.Go(func() {
-			var (
-				msg    string
-				status int
-			)
-			select {
-			case err = <-upstreamError:
-				if !websocket.IsCloseError(err, websocket.CloseAbnormalClosure, websocket.CloseNormalClosure) {
-					log.Err(err).Uint64("request_id", requestID).Str("provider", reqctx.Provider).Msg("upstream error")
-					status = websocket.CloseGoingAway
-					msg = fmt.Sprintf("upstream [%s] error: %v", reqctx.Provider, err)
-				} else {
-					status = websocket.CloseNormalClosure
-					msg = fmt.Sprintf("upstream [%s] closed connection", reqctx.Provider)
-				}
-				_ = clientConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(status, msg))
-			case err = <-clientError:
-				_ = providerConn.WriteMessage(websocket.CloseMessage, nil)
-				if !websocket.IsCloseError(err, websocket.CloseAbnormalClosure, websocket.CloseNormalClosure) {
-					log.Err(err).Uint64("request_id", requestID).Str("client", reqctx.Client).Msg("client error")
-				}
-			}
-		})
-		wg.Wait()
-		log.Info().
-			Uint64("request_id", requestID).
-			Str("client", reqctx.Client).
-			Str("provider", reqctx.Provider).
-			Msg("websocket closed")
-	})
-	if upgradeErr != nil {
-		log.Error().Err(upgradeErr).Uint64("request_id", requestID).Msg("error during handshake")
 	}
 }
 
@@ -515,21 +430,16 @@ func isBatch(raw json.RawMessage) bool {
 }
 
 func (srv *Server) loadBalancerMiddleware(next fasthttp.RequestHandler) fasthttp.RequestHandler {
-	nameToLBAlgo := make(map[string]string)
-	for _, rpc := range srv.rpcs {
-		nameToLBAlgo["/"+rpc.Name] = rpc.BalancerType
-	}
-
 	return func(ctx *fasthttp.RequestCtx) {
-		balancerType := nameToLBAlgo[string(ctx.Path())]
+		balancerType := srv.nameToLBAlgo[string(ctx.Path())]
 
 		var lb Balancer
 		switch balancerType {
-		case "p2cewma":
+		case config.P2CEWMAName:
 			lb = srv.chainToP2CEWMA[string(ctx.Path())]
-		case "round-robin":
+		case config.RRName:
 			lb = srv.chainToRR[string(ctx.Path())]
-		case "least-connection":
+		case config.LCName:
 			lb = srv.chainToLC[string(ctx.Path())]
 		}
 		if lb == nil {
@@ -623,7 +533,212 @@ func (srv *Server) wsLoggingMiddleware(next fasthttp.RequestHandler) fasthttp.Re
 			Str("latency", time.Since(start).String()).
 			Str("path", string(ctx.Path())).
 			Str("client", reqctx.Client).
-			Str("provider", reqctx.Provider).
 			Msg("websocket started")
+	}
+}
+
+const bufferSize = 1024
+
+var upgrader = websocket.FastHTTPUpgrader{ //nolint:gochecknoglobals
+	ReadBufferSize:  bufferSize,
+	WriteBufferSize: bufferSize,
+}
+
+func (srv *Server) initWSConnWithProvider(connURL string) (*websocket.Conn, error) {
+	providerConn, resp, err := websocket.DefaultDialer.Dial(connURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("can not dial websocket connection to provider: %w", err)
+	}
+	if resp.StatusCode != fasthttp.StatusSwitchingProtocols {
+		return nil, fmt.Errorf("invalid status code of switching protocols: %d", resp.StatusCode)
+	}
+
+	return providerConn, nil
+}
+
+func nonBlockingChanSend(errChan chan error, err error) {
+	select {
+	case errChan <- err:
+	default:
+	}
+}
+
+func (srv *Server) wsPipe(ctx *WSContext,
+	readConn, writeConn *websocket.Conn,
+	readErrChan, writeErrChan chan error,
+	observeMetrics func(ctx *WSContext, msg json.RawMessage),
+) {
+	var err error
+	for {
+		var msg json.RawMessage
+		err = readConn.ReadJSON(&msg)
+		if err != nil {
+			nonBlockingChanSend(readErrChan, err)
+			return
+		}
+
+		observeMetrics(ctx, msg)
+
+		err = writeConn.WriteJSON(msg)
+		if err != nil {
+			nonBlockingChanSend(writeErrChan, err)
+			return
+		}
+	}
+}
+
+func (srv *Server) wsLoadBalancerMiddleware(next WSHandler) WSHandler {
+	return func(ctx *WSContext) {
+		var lb Balancer
+		switch ctx.loadBalanacer {
+		case config.RRName:
+			lb = srv.chainToRR[ctx.requestPath]
+		case config.LCName:
+			lb = srv.chainToLC[ctx.requestPath]
+		}
+		if lb == nil {
+			log.Error().
+				Uint64("request_id", ctx.requestID).
+				Str("balancer", ctx.loadBalanacer).
+				Msg("no balancer configured for rpc")
+			_ = ctx.conn.WriteMessage(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "no balancer configured for rpc"))
+			return
+		}
+		payload, release := lb.Borrow()
+		defer release(true, 0)
+
+		ctx.providerName = payload.Name
+		ctx.providerURL = payload.URL
+
+		next(ctx)
+	}
+}
+
+func (srv *Server) extractMethodFromBody(msg json.RawMessage) string {
+	const batchMethod = "batch"
+	if isBatch(msg) {
+		return batchMethod
+	}
+
+	var req JSONRPCRequest
+	err := json.Unmarshal(msg, &req)
+	if err != nil {
+		return ""
+	}
+
+	return req.Method
+}
+
+func (srv *Server) wsHandler(ctx *WSContext) {
+	providerConn, err := srv.initWSConnWithProvider(ctx.providerURL)
+	if err != nil {
+		_ = ctx.conn.WriteMessage(websocket.CloseMessage, nil)
+		log.Error().
+			Err(err).
+			Uint64("request_id", ctx.requestID).
+			Str("provider", ctx.providerName).
+			Msg("can not init connection to provider")
+		return
+	}
+	defer providerConn.Close()
+
+	var (
+		upstreamError = make(chan error, 1)
+		clientError   = make(chan error, 1)
+	)
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		srv.wsPipe(ctx, ctx.conn, providerConn, clientError, upstreamError, func(ctx *WSContext, msg json.RawMessage) {
+			method := srv.extractMethodFromBody(msg)
+			if method == "" {
+				log.Error().Uint64("request_id", ctx.requestID).Msg("can not parse request")
+			}
+			ctx.method = method
+			metrics.RequestTotalCounter.WithLabelValues(ctx.chainID, ctx.rpcName, metrics.WebsocketTransport, ctx.providerName, ctx.loadBalanacer, ctx.method, ctx.client).
+				Inc()
+		})
+	})
+	wg.Go(func() {
+		srv.wsPipe(ctx, providerConn, ctx.conn, upstreamError, clientError, func(ctx *WSContext, msg json.RawMessage) {
+			metrics.ResponseSizeBytes.WithLabelValues(ctx.chainID, ctx.rpcName, metrics.WebsocketTransport, ctx.providerName, ctx.loadBalanacer, "websocket", ctx.client).
+				Observe(float64(len(msg)))
+		})
+	})
+	wg.Go(func() {
+		var (
+			msg    string
+			status int
+		)
+		select {
+		case err = <-upstreamError:
+			if !websocket.IsCloseError(err, websocket.CloseAbnormalClosure, websocket.CloseNormalClosure) {
+				log.Err(err).Uint64("request_id", ctx.requestID).Str("provider", ctx.providerName).Msg("upstream error")
+				status = websocket.CloseGoingAway
+				msg = fmt.Sprintf("upstream [%s] error: %v", ctx.providerName, err)
+				metrics.RequestError.WithLabelValues(ctx.chainID, ctx.rpcName, metrics.WebsocketTransport, ctx.providerName, ctx.loadBalanacer, ctx.method, ctx.client).
+					Inc()
+			} else {
+				status = websocket.CloseNormalClosure
+				msg = fmt.Sprintf("upstream [%s] closed connection", ctx.providerName)
+			}
+			_ = ctx.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(status, msg))
+		case err = <-clientError:
+			_ = providerConn.WriteMessage(websocket.CloseMessage, nil)
+			if !websocket.IsCloseError(err, websocket.CloseAbnormalClosure, websocket.CloseNormalClosure) {
+				log.Err(err).Uint64("request_id", ctx.requestID).Str("client", ctx.client).Msg("client error")
+			}
+			metrics.ClientRequestError.WithLabelValues(ctx.chainID, ctx.rpcName, metrics.WebsocketTransport, ctx.providerName, ctx.loadBalanacer, ctx.method, ctx.client).
+				Inc()
+		}
+	})
+	wg.Wait()
+	log.Info().
+		Uint64("request_id", ctx.requestID).
+		Str("client", ctx.client).
+		Str("provider", ctx.providerName).
+		Msg("websocket closed")
+}
+
+func (srv *Server) wsUpgrader(next WSHandler) fasthttp.RequestHandler {
+	const base = 10
+
+	return func(ctx *fasthttp.RequestCtx) {
+		reqctx := GetReqCtx(ctx)
+		requestID := ctx.ID()
+		lb, ok := srv.nameToLBAlgo[string(ctx.Path())]
+		path := string(ctx.Path())
+		if !ok {
+			ctx.Error(
+				fmt.Sprintf("can not find lb algo for path: %s", string(ctx.Path())),
+				fasthttp.StatusInternalServerError,
+			)
+			return
+		}
+		chainID, exist := srv.nameToChainID[string(ctx.Path())]
+		if !exist {
+			log.Debug().Uint64("request_id", ctx.ID()).Msg("unknown path")
+			ctx.Error("not found", fasthttp.StatusNotFound)
+			return
+		}
+		rpcName := strings.TrimPrefix(string(ctx.Path()), "/")
+
+		upgradeErr := upgrader.Upgrade(ctx, func(clientConn *websocket.Conn) {
+			defer clientConn.Close()
+
+			next(&WSContext{
+				conn:          clientConn,
+				requestID:     requestID,
+				client:        reqctx.Client,
+				loadBalanacer: lb,
+				requestPath:   path,
+				chainID:       strconv.FormatInt(chainID, base),
+				rpcName:       rpcName,
+			})
+		})
+		if upgradeErr != nil {
+			log.Error().Err(upgradeErr).Uint64("request_id", requestID).Msg("error during handshake")
+		}
 	}
 }

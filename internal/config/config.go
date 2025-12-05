@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	p2cewmaName = "p2cewma"
-	rrName      = "round-robin"
-	lcName      = "least-connection"
+	P2CEWMAName = "p2cewma"
+	RRName      = "round-robin"
+	LCName      = "least-connection"
 )
 
 const (
@@ -196,7 +196,7 @@ func validateProviderConnURL(rpc RPC) error {
 		case "http", "https":
 			http++
 		case "ws", "wss":
-			if rpc.BalancerType == "" || rpc.BalancerType == p2cewmaName {
+			if rpc.BalancerType == "" || rpc.BalancerType == P2CEWMAName {
 				return fmt.Errorf("rpc[%s].balancer_type is unsupported for websocket", rpc.Name)
 			}
 			ws++
@@ -217,9 +217,9 @@ func validateProviderConnURL(rpc RPC) error {
 
 func validateGlobalRPCConfig(cfg *GlobalRPCConfig) error {
 	switch cfg.BalancerType {
-	case "", p2cewmaName:
-		cfg.BalancerType = p2cewmaName
-	case rrName, lcName:
+	case "", P2CEWMAName:
+		cfg.BalancerType = P2CEWMAName
+	case RRName, LCName:
 		return nil
 	default:
 		return errors.New(

@@ -54,8 +54,9 @@ Placeholders can be used anywhere in the YAML file.
 - **least-connection**
   Distributes requests based on the number of active in-flight calls per provider. It always prefers providers that are currently less loaded.
 
-> **p2cewma** is a default option.
+> **p2cewma** is a default option for http.
 > The p2cewma algorithm automatically adapts to provider latency and reliability, giving higher throughput under variable RPC conditions.
+> **p2cewma** is not available for websocket.
 
 To configure a balancing strategy, specify it per-chain in your config:
 ```yaml 
